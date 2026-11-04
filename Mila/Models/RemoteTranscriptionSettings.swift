@@ -6,11 +6,13 @@ import TranscriptionCore
 /// mirroring the privacy-first default: on-device whisper.cpp unless the user
 /// deliberately opts into a remote endpoint.
 enum TranscriptionBackend: String, CaseIterable, Identifiable, Codable {
-    /// In-process whisper.cpp (the default). Audio never leaves the device.
+    /// In-process whisper.cpp. Audio never leaves the device.
     case local
     /// An OpenAI-compatible `/v1/audio/transcriptions` endpoint — OpenAI's own
     /// API or any self-hosted server that speaks the same protocol (e.g.
     /// `speaches` serving an ivrit.ai model). Audio is uploaded off-device.
+    /// Fork note: this is the DEFAULT here (upstream defaults to `local`) — see
+    /// the `?? .remote` fallback in `init`.
     case remote
 
     var id: String { rawValue }
@@ -281,7 +283,13 @@ final class RemoteTranscriptionSettings: ObservableObject {
         // untouched underneath, so removing the profile restores them.
         self.storedBackend = managed.backend
             ?? TranscriptionBackend(rawValue: defaults.string(forKey: Keys.backend) ?? "")
-            ?? .local
+            // Fork change: this build defaults to the REMOTE backend, so a fresh
+            // install needs no local whisper weights (see the removed
+            // `ensureDefaultModelsInstalled()` launch hook in MilaApp) and audio
+            // routes to /v1/audio/transcriptions from the first recording. Set a
+            // real endpoint + model + token in Settings → Transcription; flip the
+            // picker back to Local any time you want on-device whisper.
+            ?? .remote
         self.storedEndpoint = managed.endpoint
             ?? defaults.string(forKey: Keys.endpoint) ?? Self.defaultEndpoint
         self.storedModel = managed.model ?? defaults.string(forKey: Keys.model) ?? Self.defaultModel

@@ -14,12 +14,25 @@ final class RemoteTranscriptionSettingsTests: XCTestCase {
                                            apiKeyKeychainKey: "RemoteTranscriptionSettingsTests.\(label).apiKey")
     }
 
-    func test_defaults_areLocalAndOpenAI() {
+    func test_defaults_areRemoteAndOpenAI() {
+        // Fork change: the compiled fallback backend is `.remote` (this build
+        // transcribes through a remote API and never auto-downloads weights).
         let settings = makeSettings()
-        XCTAssertEqual(settings.backend, .local)
-        XCTAssertFalse(settings.isActive)
+        XCTAssertEqual(settings.backend, .remote)
+        XCTAssertTrue(settings.isActive)
         XCTAssertEqual(settings.endpoint, RemoteTranscriptionSettings.defaultEndpoint)
         XCTAssertEqual(settings.model, RemoteTranscriptionSettings.defaultModel)
+    }
+
+    func test_storedLocalBackend_stillWinsOverTheForkDefault() {
+        let suiteName = "RemoteTranscriptionSettingsTests.explicitLocal"
+        let suite = UserDefaults(suiteName: suiteName)!
+        suite.removePersistentDomain(forName: suiteName)
+        suite.set("local", forKey: "transcription.backend")
+        let settings = RemoteTranscriptionSettings(defaults: suite,
+                                                   apiKeyKeychainKey: "\(suiteName).apiKey")
+        XCTAssertEqual(settings.backend, .local)
+        XCTAssertFalse(settings.isActive)
     }
 
     func test_isConfigured_requiresKeyForOpenAI() {
@@ -328,9 +341,11 @@ final class RemoteTranscriptionSettingsTests: XCTestCase {
     }
 
     func test_localBackend_doesNotReadKeychain() {
-        // Seed a real token under an isolated key, then construct with the
-        // default (local) backend. A local-only user must come up with an empty
-        // apiKey and we must NOT have read the Keychain (which would prompt).
+        // Seed a real token under an isolated key, then construct with an
+        // explicitly-stored local backend. A local-only user must come up with an
+        // empty apiKey and we must NOT have read the Keychain (which would
+        // prompt). `transcription.backend` is pinned here because this fork's
+        // unmanaged fallback is `.remote`, not upstream's `.local`.
         let key = "RemoteTranscriptionSettingsTests.\(#function).apiKey"
         KeychainHelper.delete(key: key)
         KeychainHelper.save(key: key, value: "sk-stored")
@@ -338,6 +353,7 @@ final class RemoteTranscriptionSettingsTests: XCTestCase {
 
         let suite = UserDefaults(suiteName: "RemoteTranscriptionSettingsTests.\(#function)")!
         suite.removePersistentDomain(forName: "RemoteTranscriptionSettingsTests.\(#function)")
+        suite.set("local", forKey: "transcription.backend")
         let settings = RemoteTranscriptionSettings(defaults: suite, apiKeyKeychainKey: key)
 
         XCTAssertEqual(settings.backend, .local)

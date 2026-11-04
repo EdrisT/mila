@@ -545,6 +545,11 @@ struct MilaApp: App {
         }) {
             let path = String(arg.dropFirst("--ui-test-tiny-model-path=".count))
             mgr.setTestModelOverride(URL(fileURLWithPath: path))
+            // The tiny-model E2E jobs exercise on-device whisper, and this fork's
+            // unmanaged backend fallback is `.remote` — so pin them back to local
+            // here, otherwise they would upload to the remote endpoint instead of
+            // loading the fixture model.
+            remoteSettings.backend = .local
         }
         if CommandLine.arguments.contains("--ui-test-rtl-live-hebrew") {
             liveTrans.seedForTesting([
@@ -1106,7 +1111,10 @@ struct MilaApp: App {
                 .environmentObject(liveAISession)
                 .environmentObject(updater)
                 .frame(minWidth: 1000, minHeight: 640)
-                .task { ensureDefaultModelsInstalled() }
+                // Fork change: this build transcribes through a remote API, so it
+                // never auto-fetches the multi-GB whisper weights on launch (was
+                // `.task { ensureDefaultModelsInstalled() }`). Local weights are
+                // now only ever fetched by hand from Settings → Models.
                 .task { prewarmDefaultModel() }
                 .task { await diarizationSettings.runHealthCheck() }
                 .task { await diarizationSettings.runStartupCheckDepsIfNeeded() }
@@ -2389,54 +2397,12 @@ struct MilaApp: App {
             || NSClassFromString("XCTestCase") != nil
     }
 
-    /// Pre-download the two default models on first launch:
-    ///   - ivrit.ai large-v3 (Hebrew dictation, ~3 GB)
-    ///   - OpenAI turbo (English dictation, ~1.6 GB)
-    /// We start them in parallel — `ModelManager` queues them through the
-    /// same `URLSession` so they don't actually saturate the network, and
-    /// the in-app banner shows whichever is currently selected.
-    private func ensureDefaultModelsInstalled() {
-        // Skip entirely under XCTest hosting (unit or UI) — same rationale
-        // as `prewarmDefaultModel()`: `MilaTests` is app-hosted, so this
-        // `.task` runs for real during ordinary unit test runs too. Without
-        // this guard it calls `setSelected`/`download` on the production
-        // `ModelManager`, which is backed by `UserDefaults.standard` (see
-        // `MilaApp.body`'s `ModelManager(modelsDirectory:)` call) — every
-        // `xcodebuild test` invocation would mutate the real app's declined
-        // models / selected model and could kick off real network downloads.
-        guard !isRunningUnderXCTest else { return }
-        // Skip the multi-GB local model downloads + CoreML prep entirely for
-        // users who've opted into the remote backend — they don't need any
-        // local weights. (The Models tab still offers manual downloads, and
-        // switching back to local re-triggers this on next launch.)
-        guard !remoteTranscriptionSettings.isActive else { return }
-        // Establish the default selection only on a fresh install. Re-asserting
-        // it on every launch overwrote whatever the user picked in Settings →
-        // Models (#266); once deletion started sticking (#263) it also kept
-        // re-selecting a model that is no longer on disk, which is the first
-        // step into the dead end in #264. `ModelManager.init` already restores
-        // a persisted selection on its own, so there is nothing to do here
-        // once the user has made one. The declined check still guards the
-        // fresh-install case — a user can delete a model without ever having
-        // explicitly chosen one.
-        if !modelManager.hasPersistedSelection,
-           !modelManager.isDeclined(WhisperModel.ivritLarge) {
-            modelManager.setSelected(WhisperModel.ivritLarge)
-        }
-        for model in [WhisperModel.ivritLarge, WhisperModel.openaiTurbo] {
-            if !modelManager.isInstalled(model)
-                && !modelManager.isDeclined(model)
-                && modelManager.downloads[model.name] == nil {
-                modelManager.download(model)
-            }
-        }
-        // Pick up any sibling `-encoder.mlmodelc` that's missing for an
-        // already-installed `.bin`. New users get the CoreML zip via the
-        // post-`.bin`-install hook in ModelManager; this catches the
-        // upgrade case (existing 1.7 users who already have the .bin on
-        // disk from a previous run).
-        modelManager.ensureCoreMLInstalled()
-    }
+    // Fork change: `ensureDefaultModelsInstalled()` — the first-launch
+    // pre-download of ivritLarge + openaiTurbo plus `ensureCoreMLInstalled()` —
+    // was removed together with its `.task` call site. Nothing in this build
+    // downloads transcription weights on its own; `ModelManager.download(_:)`
+    // stays reachable from Settings → Models (Models tab), and the post-`.bin`
+    // CoreML hook in ModelManager still fires for a manual download.
 }
 
 /// Owns the graceful shutdown sequence.

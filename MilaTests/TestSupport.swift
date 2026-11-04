@@ -112,7 +112,7 @@ enum TestSupport {
     }
 
     /// A `RemoteTranscriptionSettings` isolated to a fresh per-`label`
-    /// UserDefaults suite, defaulting to the LOCAL backend.
+    /// UserDefaults suite, pinned to the LOCAL backend.
     ///
     /// Any `TranscriptionService` test that injects a `StubWhisperEngine`
     /// MUST also pass one of these as `remoteSettings:`. Otherwise the service
@@ -121,13 +121,15 @@ enum TestSupport {
     /// is persisted there (a dev box that ran Live AI, or a leaked test write),
     /// the service routes to the REAL remote endpoint and bypasses the stub
     /// entirely, reddening the whole suite with real transcripts. Isolating to
-    /// a clean suite (which has no `transcription.backend` key, so it defaults
-    /// to `.local`) makes the stub authoritative regardless of host state.
+    /// a clean suite makes the stub authoritative regardless of host state —
+    /// and the key is now written explicitly, because this fork's compiled
+    /// fallback is `.remote`, not upstream's `.local`.
     @MainActor
     static func isolatedRemoteSettings(label: String) -> RemoteTranscriptionSettings {
         let suiteName = "\(label).remote"
         let suite = UserDefaults(suiteName: suiteName)!
         suite.removePersistentDomain(forName: suiteName)
+        suite.set("local", forKey: "transcription.backend")
         return RemoteTranscriptionSettings(defaults: suite)
     }
 

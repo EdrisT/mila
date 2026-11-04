@@ -103,11 +103,12 @@ final class ModelManager: NSObject, ObservableObject {
     private static let declinedModelsKey = "model.declinedNames"
 
     /// Names of models the user explicitly deleted via Settings. Consulted
-    /// by `MilaApp.ensureDefaultModelsInstalled()` so a deliberate delete
-    /// doesn't come back on the next launch — `isInstalled` alone can't
+    /// wherever a model is offered for re-download (`isInstalled` alone can't
     /// distinguish "never downloaded" from "downloaded, then removed on
-    /// purpose." Cleared the moment `download(_:)` is called again for that
-    /// model, since that's an explicit request for it.
+    /// purpose"; upstream's first-launch auto-download in
+    /// `MilaApp.ensureDefaultModelsInstalled()` read it too, but that hook is
+    /// removed in this fork). Cleared the moment `download(_:)` is called again
+    /// for that model, since that's an explicit request for it.
     @Published private(set) var declinedModelNames: Set<String>
 
     /// True when `selectedModelName` was restored from a choice the user
@@ -437,10 +438,9 @@ extension ModelManager: URLSessionDownloadDelegate {
             guard let model = self.observers.removeValue(forKey: id) else { return }
             // Keep `downloads[model.name]` set until we're truly done (verified
             // AND installed, or failed) — otherwise during the multi-second
-            // off-main hash the duplicate-download guard in `download(_:)` and
-            // the auto-download check in `ensureDefaultModelsInstalled` both
-            // see no in-flight download and can kick off a redundant fetch of
-            // the same 3 GB file.
+            // off-main hash the duplicate-download guard in `download(_:)` can
+            // see no in-flight download and kick off a redundant fetch of the
+            // same 3 GB file.
             defer {
                 self.downloads.removeValue(forKey: model.name)
                 // Now that the .bin is on disk, auto-fetch the sibling
