@@ -11,6 +11,10 @@ Packages/*/.swiftpm/
 *.xcworkspace
 *.xcuserdata
 
+# Local build caches the Makefile keeps in-repo: SPM package checkouts (Sparkle,
+# MCP), SwiftPM cache/config/security, pip cache + Python-bundle temp tree.
+.local/
+
 # Coverage / profiling artifacts
 default.profraw
 *.profdata
