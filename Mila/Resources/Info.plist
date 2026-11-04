@@ -55,6 +55,16 @@
 	<false/>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Mila uses AppleEvents to paste dictated text into the active app.</string>
+	<!-- Calendar: ONE feature, two keys. macOS 14+ EventKit asks for full
+	     calendar access and reads NSCalendarsFullAccessUsageDescription, but the
+	     older NSCalendarsUsageDescription string is what some hosts (and older
+	     tooling) still display. Both carry the same sentence, and both say what
+	     the code actually does: Mila has no EventKit write call anywhere, so
+	     "never creates or changes an event" is a promise it can keep. -->
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Mila reads the event happening when you record, so a recording can be linked to it — for its name, the invite's attendees, and the invite's notes in the summary. Mila never creates or changes an event.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Mila reads the event happening when you record, so a recording can be linked to it — for its name, the invite's attendees, and the invite's notes in the summary. Mila never creates or changes an event.</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>Written by Uri Harduf from Island</string>
 	<key>NSMicrophoneUsageDescription</key>

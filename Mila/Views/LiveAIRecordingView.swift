@@ -207,6 +207,9 @@ struct LiveAIRecordingView: View {
 
             Spacer(minLength: 12)
 
+            NextRecordingCalendarButton(accessibilityID: "liveAI.calendar.button")
+                .font(.callout)
+
             HStack(spacing: 6) {
                 Image(systemName: "folder")
                     .font(.caption)
@@ -574,6 +577,9 @@ struct LiveAIRecordingView: View {
                                                    // embeddings for this recording are not
                                                    // final until the diarizer's queue has
                                                    // drained at stop anyway.
+                                                   // The pending link, not a stored row: this
+                                                   // recording has no id yet.
+                                                   inviteAttendees: actions.nextRecordingCalendarLink?.attendees ?? [],
                                                    onAssignName: { raw, name in
                                                        if let name {
                                                            transcriber.speakerNames[raw] = name
@@ -884,6 +890,11 @@ private struct TranscriptLineView: View {
     var useSpeakerColor: Bool = false
     /// User-assigned live speaker names (raw ID → name).
     var speakerNames: [String: String] = [:]
+    /// Attendee names from the calendar invite the recording in flight is
+    /// synced with — offered in the rename popover. Handed in as a value from
+    /// the pending link, because there is no `Recording` row yet: the live pane
+    /// is naming speakers of a recording that has not been saved.
+    var inviteAttendees: [String] = []
     /// Persists a rename picked from the label's popover mid-recording:
     /// (raw speaker ID, chosen name or nil-to-reset).
     var onAssignName: (String, String?) -> Void = { _, _ in }
@@ -942,6 +953,7 @@ private struct TranscriptLineView: View {
                         names: speakerNames,
                         language: language,
                         color: useSpeakerColor ? sp.speakerColor(names: speakerNames) : Color.accentColor,
+                        inviteAttendees: inviteAttendees,
                         font: .caption.weight(.semibold),
                         onAssign: { name in onAssignName(sp, name) }
                     )

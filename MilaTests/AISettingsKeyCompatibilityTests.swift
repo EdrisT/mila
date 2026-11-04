@@ -212,7 +212,7 @@ final class AISettingsKeyCompatibilityTests: XCTestCase {
         // blank title is an unclickable-looking empty row, and a duplicate
         // title or identifier makes deep links and GUI tests ambiguous.
         let all = SettingsTab.allCases
-        XCTAssertEqual(all.count, 9, "Destination count changed — intended?")
+        XCTAssertEqual(all.count, 10, "Destination count changed — intended?")
 
         for tab in all {
             XCTAssertFalse(tab.title.isEmpty, "\(tab) has no sidebar title")
@@ -231,6 +231,12 @@ final class AISettingsKeyCompatibilityTests: XCTestCase {
         // Sidebar order is `allCases` order, which is declaration order,
         // which is raw-value order. The old left-to-right tab order is
         // preserved top-to-bottom.
+        //
+        // Inserting `.calendar` between `.meetings` and `.voiceMemos` therefore
+        // shifted voiceMemos/storage from 7/8 to 8/9. That is safe because
+        // nothing persists a raw value today (see the note above) — the tripwire
+        // exists for whoever first writes one, and at that point the raw values
+        // freeze and a new destination goes last.
         XCTAssertEqual(all.map(\.rawValue), Array(0..<all.count))
     }
 
@@ -247,6 +253,7 @@ final class AISettingsKeyCompatibilityTests: XCTestCase {
         XCTAssertEqual(SettingsTab.aiFeatures.accessibilityID, "settings.section.aiFeatures")
         XCTAssertEqual(SettingsTab.speakers.accessibilityID, "settings.section.speakers")
         XCTAssertEqual(SettingsTab.meetings.accessibilityID, "settings.section.meetings")
+        XCTAssertEqual(SettingsTab.calendar.accessibilityID, "settings.section.calendar")
         XCTAssertEqual(SettingsTab.voiceMemos.accessibilityID, "settings.section.voiceMemos")
         XCTAssertEqual(SettingsTab.storage.accessibilityID, "settings.section.storage")
     }

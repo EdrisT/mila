@@ -192,6 +192,15 @@ targets:
         NSMicrophoneUsageDescription: "Mila needs microphone access to record audio for transcription and dictation."
         NSScreenCaptureUsageDescription: "Mila needs screen recording permission to capture audio from apps like Zoom."
         NSAppleEventsUsageDescription: "Mila uses AppleEvents to paste dictated text into the active app."
+        # Calendar integration. Two keys for one feature: macOS 14+ EventKit
+        # gates event reads behind full calendar access and shows
+        # NSCalendarsFullAccessUsageDescription, while NSCalendarsUsageDescription
+        # is the legacy key still consulted/displayed elsewhere. Same sentence in
+        # both — and both state the limit honestly: Mila contains no EventKit
+        # write call, so it cannot add or change an event. Note the system grants
+        # reads AND writes together; there is no read-only grant to promise.
+        NSCalendarsFullAccessUsageDescription: "Mila reads the event happening when you record, so a recording can be linked to it — for its name, the invite's attendees, and the invite's notes in the summary. Mila never creates or changes an event."
+        NSCalendarsUsageDescription: "Mila reads the event happening when you record, so a recording can be linked to it — for its name, the invite's attendees, and the invite's notes in the summary. Mila never creates or changes an event."
         NSSpeechRecognitionUsageDescription: "Mila transcribes locally on your Mac; no audio is sent to the cloud."
         NSPrincipalClass: NSApplication
         LSUIElement: false

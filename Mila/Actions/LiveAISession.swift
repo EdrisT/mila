@@ -31,6 +31,19 @@ final class LiveAISession: ObservableObject {
     private let llmSettings: LLMSettings
     private let liveAISettings: LiveAISettings
 
+    /// Where to read the calendar event this recording was synced with, if
+    /// any (calendar integration). Injected as a source rather than a value
+    /// so the session can never carry a previous recording's invite into the
+    /// next recording's prompt: the source answers "what is the recording on
+    /// the live pipeline synced to *right now*", and that answer is cleared
+    /// at Stop. nil (the default, and every test that does not care) means no
+    /// calendar context, which is the pre-feature behaviour.
+    ///
+    /// `weak` because the owner is the app, and a strong reference here would
+    /// keep the sync controller — and through it the EventKit store — alive
+    /// independently of the scene graph.
+    weak var calendarContextSource: CalendarContextSource?
+
     private var inFlight: Task<Void, Never>?
 
     /// Test seam: the task currently occupying the serialization slot above.
@@ -143,6 +156,35 @@ final class LiveAISession: ObservableObject {
 
         Use the notes only to interpret what you actually hear: names, spellings, acronyms, and which topic is being discussed. Do NOT summarise the notes, and do NOT turn them into action items. Every action item and every sentence of the summary must come from the transcript itself — if something in the notes never comes up in the conversation, it does not appear in your output at all.
         """
+    }
+
+    /// Per-meeting *background* context, assembled from the two sources the
+    /// user can supply it from: their own notes (Settings → the Live AI
+    /// context box) and the calendar event they synced for this recording.
+    ///
+    /// Both go through the one guard rail in `promptWithContext`, which is
+    /// written for exactly the failure both share — an agenda reading like a
+    /// transcript of decisions already taken — but each is LABELED with where
+    /// it came from, because the model otherwise cannot tell its own user's
+    /// plan from an invite someone else wrote. `static` + pure, so the wire
+    /// format is unit-testable without a subprocess or a Calendar.app.
+    static func contextBlock(userNotes: String,
+                             calendarLink: CalendarLink?) -> String {
+        let notes = userNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+        let eventNotes = calendarLink?.summaryNotes ?? ""
+        var blocks: [String] = []
+        if !notes.isEmpty {
+            blocks.append("NOTES THE USER TYPED IN MILA FOR THIS MEETING:\n\(notes)")
+        }
+        if !eventNotes.isEmpty {
+            let title = calendarLink?.eventTitle ?? ""
+            blocks.append("""
+            NOTES FROM THE CALENDAR INVITE THE USER SYNCED THIS RECORDING TO “\(title)”:
+            Those notes were written by whoever created the event — often not the user, and usually before the meeting. Treat them as context for names and topics only.
+            \(eventNotes)
+            """)
+        }
+        return blocks.joined(separator: "\n\n")
     }
 
     /// Pure throttle core: how long to wait before the next tick may
@@ -473,9 +515,12 @@ final class LiveAISession: ObservableObject {
         }()
         // Read the per-meeting notes at TICK time, not at `start()` — a
         // meeting-detector auto-start beats the user to the pane, so the
-        // agenda usually gets pasted a minute into the recording.
-        let context = liveAISettings.meetingContext
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // agenda usually gets pasted a minute into the recording. The
+        // calendar half is read the same way for the same reason: the sync
+        // button is usually pressed a minute IN, once the user has noticed
+        // the invite exists.
+        let context = Self.contextBlock(userNotes: liveAISettings.meetingContext,
+                                        calendarLink: calendarContextSource?.liveCalendarLink)
         // Editing or clearing the notes mid-recording has to actually take
         // effect, and in session mode the prompt is only half the story: a
         // `--resume` tick carries every earlier turn, so notes already sent

@@ -63,6 +63,65 @@ struct NextRecordingMeetingNameField: View {
     }
 }
 
+/// Calendar-sync button for the next/current recording (Home + live recording
+/// screen). Same leaf rationale as the name field and folder picker above, and
+/// the reason it must be one: the live header re-renders at transcript cadence,
+/// and a native control inside a body that churns that fast is how the app
+/// beachballs with an open menu (#248 family).
+///
+/// Renders nothing when the integration is off or every behaviour is switched
+/// off. When something IS linked it shows the event title, because the whole
+/// point of pressing it mid-meeting is to see whether the meeting got linked at
+/// all — and to be able to change the choice.
+struct NextRecordingCalendarButton: View {
+    @EnvironmentObject private var calendarSettings: CalendarSettings
+    @EnvironmentObject private var calendarSync: CalendarSyncController
+    let accessibilityID: String
+
+    var body: some View {
+        if calendarSettings.isEnabled && calendarSettings.hasWorkToDo {
+            Button {
+                calendarSync.present()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: linked != nil ? "calendar.circle.fill" : "calendar")
+                        .foregroundStyle(linked != nil ? Color.accentColor : Color.secondary)
+                    if let title = linked?.eventTitle {
+                        Text(title)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                    } else {
+                        Text("Calendar")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .buttonStyle(.borderless)
+            .disabled(calendarSync.isWorking)
+            .frame(maxWidth: 200)
+            .help(helpText)
+            .accessibilityIdentifier(accessibilityID)
+        }
+    }
+
+    /// The link the recording on screen carries — for the live header that is
+    /// the recording in flight, for Home the one about to be recorded. Both are
+    /// the same one-shot, which is what makes the button honest in both places.
+    private var linked: CalendarLink? {
+        calendarSync.liveCalendarLink
+    }
+
+    private var helpText: String {
+        if calendarSync.isWorking {
+            return "Checking your calendar…"
+        }
+        if let linked {
+            return "Linked to “\(linked.eventTitle)” — click to change what's synced"
+        }
+        return "Link this recording to a calendar event happening now"
+    }
+}
+
 /// Inline folder picker for an EXISTING recording (recording detail view).
 /// Files the recording via `store.assign` and offers a "New Folder…" flow. Takes
 /// the recording id + its current folder as stable inputs (both only change when

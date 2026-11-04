@@ -161,6 +161,7 @@ final class DetailLayoutUITests: XCTestCase {
         ("settings.section.aiFeatures", "AI Features", "ai.features.outputLanguage"),
         ("settings.section.speakers",   "Speakers",    "speakers.enable.toggle"),
         ("settings.section.meetings",   "Meetings",    "meetings.enable.toggle"),
+        ("settings.section.calendar",   "Calendar",    "calendar.enable.toggle"),
         ("settings.section.voiceMemos", "Voice Memos", "voiceMemos.enable.toggle"),
         ("settings.section.storage",    "Storage",     "storage.chooseFolder.button"),
     ]
@@ -273,8 +274,8 @@ final class DetailLayoutUITests: XCTestCase {
         return window
     }
 
-    /// The section list is populated: all nine rows exist, are hittable, and
-    /// sit inside the window's bounds.
+    /// The section list is populated: every row exists, is hittable, and
+    /// sits inside the window's bounds.
     ///
     /// The bounds assertion is the one that matters. `exists` was true for all
     /// nine rows in the broken build too — they were just at y ≈ -2600, above

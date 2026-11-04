@@ -253,6 +253,19 @@ struct Recording: Identifiable, Codable, Hashable {
     /// `StoredRecording`.
     var untranscribedSpans: [UntranscribedSpan]?
 
+    /// The macOS Calendar event this recording was synced with, or nil when it
+    /// wasn't (calendar integration) — see `CalendarLink`. Written once, by
+    /// `QuickActionsController.stopRecording` from the one-shot the sync sheet
+    /// set, and read afterwards by the summariser (event body), the speaker
+    /// rename popover (attendee candidates) and the detail view (provenance).
+    ///
+    /// Omitted from recordings.json when nil, so an unsynced row encodes
+    /// byte-identically to before the field existed. Deliberately NOT mirrored
+    /// in MilaKit's `StoredRecording` nor carried in a `.milashare` (allowlisted
+    /// in `StoredRecordingDriftTests` and `ShareManifestTests`): an invite list
+    /// is other people's data, and it names who was *invited*, not who spoke.
+    var calendarLink: CalendarLink?
+
     /// Total seconds of audio missing from the transcript.
     var untranscribedSeconds: Double {
         (untranscribedSpans ?? []).reduce(0) { $0 + $1.duration }
@@ -365,7 +378,8 @@ struct Recording: Identifiable, Codable, Hashable {
          transcriptionDeferredAt: Date? = nil,
          retranscriptionPriorState: RetranscriptionPriorState? = nil,
          speakerNameSuggestions: [SpeakerNameSuggestion] = [],
-         untranscribedSpans: [UntranscribedSpan]? = nil) {
+         untranscribedSpans: [UntranscribedSpan]? = nil,
+         calendarLink: CalendarLink? = nil) {
         self.id = id
         self.title = title
         self.createdAt = createdAt
@@ -393,6 +407,7 @@ struct Recording: Identifiable, Codable, Hashable {
         self.retranscriptionPriorState = retranscriptionPriorState
         self.speakerNameSuggestions = speakerNameSuggestions
         self.untranscribedSpans = untranscribedSpans
+        self.calendarLink = calendarLink
     }
 
     var isTrashed: Bool { deletedAt != nil }
@@ -437,7 +452,7 @@ struct Recording: Identifiable, Codable, Hashable {
              summary, actionItems, voiceMemoUniqueID, voiceMemoFolderUUID,
              speakerNames, summaryLanguage, sharedBy, sharedAt, transcriptionDeferredAt,
              retranscriptionPriorState, speakerNameSuggestions,
-             untranscribedSpans
+             untranscribedSpans, calendarLink
         // `fullText` deliberately excluded — lives in a sidecar .txt file.
         // Legacy records that had it inline are decoded via the custom init.
         case fullText
@@ -484,6 +499,9 @@ struct Recording: Identifiable, Codable, Hashable {
         let spans = try? c.decodeIfPresent([UntranscribedSpan].self, forKey: .untranscribedSpans)
         let validSpans = (spans ?? []).filter(\.isValid)
         self.untranscribedSpans = validSpans.isEmpty ? nil : validSpans
+        // `try?` for the same all-or-nothing reason: losing the calendar link
+        // costs the provenance line and the attendee pick-list, never the row.
+        self.calendarLink = try? c.decodeIfPresent(CalendarLink.self, forKey: .calendarLink) ?? nil
         // Legacy records still have fullText inline; new records leave it
         // empty here and RecordingStore loads it from the sidecar .txt.
         self.fullText = try c.decodeIfPresent(String.self, forKey: .fullText) ?? ""
@@ -530,6 +548,9 @@ struct Recording: Identifiable, Codable, Hashable {
         if !validSpans.isEmpty {
             try c.encode(validSpans, forKey: .untranscribedSpans)
         }
+        // Omitted when nil — the common case — so an unsynced row is
+        // byte-identical to what the previous release wrote.
+        try c.encodeIfPresent(calendarLink, forKey: .calendarLink)
         // fullText intentionally omitted — sidecar .txt is the source of truth.
     }
 

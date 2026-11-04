@@ -15,6 +15,14 @@ struct ContentView: View {
     @EnvironmentObject private var liveAISettings: LiveAISettings
     @EnvironmentObject private var updater: UpdaterViewModel
     @EnvironmentObject private var shareImporter: RecordingShareImporter
+    /// Owns the calendar sync sheet, which is why it lives here: the toolbar,
+    /// the live recording header and the floating chip all open the SAME sheet,
+    /// and a `.sheet` hung off each would let them stack on each other.
+    ///
+    /// `CalendarSettings` is deliberately NOT injected into this view — the
+    /// toolbar item is a leaf that observes it, so flipping a Settings switch
+    /// does not re-diff the whole split view.
+    @EnvironmentObject private var calendarSync: CalendarSyncController
 
     @State private var selection: SidebarSelection? = .home
     @State private var search: String = ""
@@ -88,9 +96,45 @@ struct ContentView: View {
                         LanguagePickerToolbarItem()
                     }
                 }
+                // Calendar sync. Present during a recording ("link this one")
+                // and outside one ("link the recording you're about to make"),
+                // because a user who realises mid-meeting that the invite is
+                // still unlinked gets the same button they'd have used before
+                // pressing Record. Hidden entirely when the integration is off
+                // or every behaviour is switched off — a button that can do
+                // nothing is not a disabled affordance, it's a dead control.
+                ToolbarItem(placement: .primaryAction) {
+                    CalendarSyncToolbarItem()
+                }
             }
         }
         .searchable(text: $search, placement: .toolbar, prompt: "Search")
+        // The one calendar sheet, driven by `CalendarSyncController.draft`.
+        // Bound through an explicit get/set rather than `$calendarSync.draft`
+        // because `draft` is `private(set)` — only the controller may open it —
+        // and because dismissing without choosing (Escape, the close button)
+        // must land on `cancel()`: nothing is written, and the toggles the user
+        // flipped while deciding are thrown away with the draft.
+        .sheet(isPresented: Binding(
+            get: { calendarSync.draft != nil },
+            set: { if !$0 { calendarSync.cancel() } }
+        )) {
+            CalendarSyncSheet()
+        }
+        .alert(
+            "Calendar",
+            isPresented: Binding(
+                get: { calendarSync.notice != nil },
+                set: { if !$0 { calendarSync.clearNotice() } }
+            ),
+            actions: {
+                if let notice = calendarSync.notice, notice.opensSystemSettings {
+                    Button("Open Privacy Settings") { calendarSync.openPrivacySettings() }
+                }
+                Button("OK", role: .cancel) { calendarSync.clearNotice() }
+            },
+            message: { Text(calendarSync.notice?.message ?? "") }
+        )
         .alert(
             "Transcription error",
             isPresented: Binding(
@@ -520,6 +564,61 @@ private struct LanguagePickerToolbarItem: View {
     }
 }
 
+/// The calendar button in the main window's toolbar. A leaf so the two
+/// objects it observes (`CalendarSettings` for visibility, the controller for
+/// the linked state) re-render this item and nothing above it.
+///
+/// Renders nothing — not a disabled control — when the integration is off or
+/// all three behaviours are switched off, because a button whose press provably
+/// does nothing is noise the user has to learn to ignore.
+private struct CalendarSyncToolbarItem: View {
+    @EnvironmentObject private var calendarSettings: CalendarSettings
+    @EnvironmentObject private var calendarSync: CalendarSyncController
+
+    var body: some View {
+        if calendarSettings.isEnabled && calendarSettings.hasWorkToDo {
+            Button {
+                calendarSync.present()
+            } label: {
+                if calendarSync.isWorking {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: isLinked ? "calendar.circle.fill" : "calendar")
+                        .foregroundStyle(isLinked ? Color.accentColor : Color.primary)
+                }
+            }
+            .buttonStyle(.borderless)
+            .disabled(calendarSync.isWorking)
+            .help(helptext)
+            .accessibilityIdentifier("calendar.sync.button")
+        }
+    }
+
+    /// Already linked? `liveCalendarLink` is the one-shot the controller sets,
+    /// so this is true for the recording in flight AND for the pending link on
+    /// a recording that hasn't started yet — which is exactly what the user
+    /// needs to see before pressing Record.
+    private var isLinked: Bool {
+        calendarSync.liveCalendarLink != nil
+    }
+
+    private var helptext: String {
+        if calendarSync.isWorking {
+            return "Checking your calendar…"
+        }
+        if let link = calendarSync.liveCalendarLink {
+            return "Linked to “\(link.eventTitle)” — click to change what's synced"
+        }
+        return defaultHelp
+    }
+
+    /// The sentence shown when nothing is linked yet.
+    private var defaultHelp: String {
+        "Link this recording to a calendar event happening now"
+    }
+}
+
 private struct RecordingChip: View {
     @EnvironmentObject private var actions: QuickActionsController
     @EnvironmentObject private var session: RecordingSession
@@ -541,6 +640,10 @@ private struct RecordingChip: View {
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(paused ? .orange : .primary)
             ConnectionDropIndicator()
+            // Same leaf-per-object rule as `ConnectionDropIndicator`: the chip
+            // is what shows the clock at 5 Hz, so the calendar state is read
+            // here, in a child, and not by the chip itself.
+            CalendarSyncChipButton()
             // `RecordingPauseButton` applies its own `.buttonStyle(.plain)`
             // internally (closest-to-the-Button wins), so don't restate a
             // style here — it would read as doing something and do nothing.
@@ -561,6 +664,32 @@ private struct RecordingChip: View {
             Capsule().strokeBorder((paused ? Color.orange : Color.red).opacity(0.4), lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.1), radius: 6, y: 2)
+    }
+}
+
+/// The calendar button inside the floating recording chip — the same
+/// `CalendarSyncController.present()` the toolbar calls, so the flow is
+/// identical wherever it is pressed.
+private struct CalendarSyncChipButton: View {
+    @EnvironmentObject private var calendarSettings: CalendarSettings
+    @EnvironmentObject private var calendarSync: CalendarSyncController
+
+    var body: some View {
+        if calendarSettings.isEnabled && calendarSettings.hasWorkToDo {
+            Button {
+                calendarSync.present()
+            } label: {
+                Image(systemName: calendarSync.liveCalendarLink != nil
+                      ? "calendar.circle.fill" : "calendar")
+                    .foregroundStyle(calendarSync.liveCalendarLink != nil
+                                     ? Color.accentColor : Color.primary)
+            }
+            .buttonStyle(.borderless)
+            .disabled(calendarSync.isWorking)
+            .help(calendarSync.liveCalendarLink.map { "Linked to “\($0.eventTitle)” — click to change what's synced" }
+                  ?? "Link this recording to a calendar event happening now")
+            .accessibilityIdentifier("calendar.sync.chipButton")
+        }
     }
 }
 

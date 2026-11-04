@@ -43,6 +43,18 @@ struct SpeakerNamePicker: View {
     /// drop the action (island-io/mila#237).
     var onRequestMerge: ((String) -> Void)?
 
+    /// People the calendar invite for this meeting lists, offered as one-tap
+    /// candidates (calendar integration). Empty when the recording was never
+    /// synced, when the user had attendee suggestions off at sync time, or when
+    /// the invite named nobody.
+    ///
+    /// A candidate is not an assignment: tapping one goes through the same
+    /// `onAssign` as any typed name, which is what keeps the #348 rule intact —
+    /// a voice profile only ever learns a name the user confirmed. The invite
+    /// says who was invited, not who spoke, so nothing here may be applied
+    /// automatically.
+    var inviteAttendees: [String] = []
+
     @EnvironmentObject private var directory: SpeakerDirectory
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
@@ -69,6 +81,45 @@ struct SpeakerNamePicker: View {
                 .padding(10)
 
             Divider()
+
+            // Attendees first, above the filtered directory list: they are the
+            // short, meeting-specific set, and the search field filters the
+            // directory — filtering these too would hide the very candidate the
+            // section exists to surface.
+            if !inviteAttendees.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("From the meeting invite")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.top, 8)
+                    ForEach(inviteAttendees, id: \.self) { name in
+                        row {
+                            assign(name)
+                        } label: {
+                            HStack {
+                                Image(systemName: "calendar")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(name).lineLimit(1)
+                                Spacer()
+                                if name == currentName {
+                                    Image(systemName: "checkmark")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(Color.accentColor)
+                                }
+                            }
+                        }
+                    }
+                    Text("Invited — not necessarily in this room")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                }
+                .padding(.bottom, 4)
+                Divider()
+            }
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
@@ -234,6 +285,10 @@ struct SpeakerLabelButton: View {
     let names: [String: String]
     let language: String
     let color: Color
+    /// Attendee names from the synced calendar invite, passed through to the
+    /// popover. A plain array so the label stays a value-input leaf in the
+    /// transcript panes, which re-render at transcript cadence.
+    var inviteAttendees: [String] = []
     /// Text appended after the name — the detail view's tight-prefix
     /// layout uses ":", the live pane's fixed column uses nothing.
     var suffix: String = ""
@@ -269,7 +324,8 @@ struct SpeakerLabelButton: View {
                     onSplit: onSplit,
                     otherSpeakers: otherSpeakers,
                     onMoveLine: onMoveLine,
-                    onRequestMerge: onRequestMerge
+                    onRequestMerge: onRequestMerge,
+                    inviteAttendees: inviteAttendees
                 )
             }
             .help("Rename speaker")

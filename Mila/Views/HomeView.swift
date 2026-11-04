@@ -191,6 +191,11 @@ struct HomeView: View {
         VStack(alignment: .leading, spacing: 10) {
             folderPicker
             meetingNameField
+            // Calendar sync for the recording about to be made. Its own row
+            // rather than squeezed next to the name field: the button shows the
+            // event title once linked, and that needs the row's width.
+            NextRecordingCalendarButton(accessibilityID: "home.record.calendar.button")
+                .font(.callout)
         }
         .frame(maxWidth: 280, alignment: .leading)
     }

@@ -791,12 +791,20 @@ final class RecordingSummarizer: ObservableObject {
         // compact item array is JSON, so a long multi-line Hebrew summary
         // full of quotes can't corrupt the parse.
         let prompt = Self.promptWithActionItems(base: basePrompt, language: promptLanguageName)
+        // Event notes last, so they sit directly above the `---` + transcript
+        // half `LLMRunner.composedPrompt` appends: context first, then the
+        // words actually spoken. Only present when the user opted into the
+        // body at sync time — `summaryNotes` is nil otherwise, and a
+        // `regenerate` months later therefore cannot widen what an earlier
+        // sync agreed to send.
+        let promptWithContext = Self.promptWithCalendarNotes(prompt,
+                                                            link: recording.calendarLink)
         return SummaryInputs(tool: tool,
                              executableOverride: executableOverride,
                              model: model,
                              extraArgs: llmSettings.extraArgsTokens,
                              promptLanguageName: promptLanguageName,
-                             prompt: prompt,
+                             prompt: promptWithContext,
                              transcript: recording.fullText,
                              openAIBaseURL: llmSettings.openAIBaseURL)
     }
@@ -944,6 +952,28 @@ final class RecordingSummarizer: ObservableObject {
         array: []
 
         \(languageDirective(language))
+        """
+    }
+
+    /// Append the synced event's notes to the one-shot summary prompt, as a
+    /// fenced non-transcript block. Returns `prompt` unchanged when the
+    /// recording has no calendar link or the user did not opt into the body.
+    ///
+    /// Same hazard `LiveAISession.promptWithContext` guards against, and the
+    /// same cure: an invite's notes are an agenda written before the meeting,
+    /// so an unlabelled block gets summarised as if it were said out loud. The
+    /// event's OWN title is deliberately not offered as a name for the meeting
+    /// — the recording's title already came from the event when the user chose
+    /// that, and telling the model what the meeting was called biases its
+    /// summary toward the title. `static` + pure for the wire format's test.
+    static func promptWithCalendarNotes(_ prompt: String, link: CalendarLink?) -> String {
+        guard let notes = link?.summaryNotes else { return prompt }
+        return """
+        \(prompt)
+
+        ---
+        BACKGROUND — the user synced this recording to a calendar event. Its notes are context for names, spellings and topics; they were written BEFORE the meeting, usually by someone else. Do NOT summarise them, do NOT turn them into action items, and do NOT report anything from them that the transcript does not mention.
+        \(notes)
         """
     }
 

@@ -241,7 +241,21 @@ final class ShareManifestTests: XCTestCase {
                                       evidence: "hi there, John here", origin: .transcript),
             ],
             // Local repair bookkeeping; set so the key-set test sees the key.
-            untranscribedSpans: [UntranscribedSpan(start: 12, end: 15.5)])
+            untranscribedSpans: [UntranscribedSpan(start: 12, end: 15.5)],
+            // The synced calendar event; set so the key-set test below sees the
+            // key and can hold it to the allowlist.
+            calendarLink: CalendarLink(
+                event: CalendarEvent(id: "EVT-1",
+                                     title: "Weekly sync",
+                                     body: "Agenda: roadmap",
+                                     start: created,
+                                     end: created.addingTimeInterval(1_800),
+                                     attendeeNames: ["Daniel", "John Doe"],
+                                     calendarTitle: "Work"),
+                includeAttendees: true,
+                includeBody: true,
+                maxAttendees: 12,
+                syncedAt: created))
     }
 
     func test_payload_strips_machine_specific_fields_and_keeps_content() throws {
@@ -345,6 +359,14 @@ final class ShareManifestTests: XCTestCase {
             // The receiver imports the transcript as sent; a full
             // re-transcription on their side covers the whole audio anyway.
             "untranscribedSpans",
+            // The calendar event this recording was synced to, including the
+            // invite's attendee list and (if the sender opted into it) the
+            // event's notes. A share reveals who the sender's calendar invited
+            // to a private meeting — other people's personal data, carried to a
+            // different machine by a transcript share. The recording's own
+            // `title` already travels, which is the only part of the event with
+            // anything to do with the transcript.
+            "calendarLink",
         ]
         let storeEncoder = JSONEncoder()
         storeEncoder.dateEncodingStrategy = .iso8601

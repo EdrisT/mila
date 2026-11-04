@@ -105,7 +105,17 @@ final class QuickActionsController: ObservableObject {
     /// silently carries into the next one.
     @Published var nextRecordingTitle: String = ""
 
-    /// Populated when a recording was force-stopped because the Mac went
+    /// The calendar event synced for the *next* recording (calendar
+    /// integration), set by `CalendarSyncController` and cleared the way
+    /// `nextRecordingTitle` is — a value chosen for one meeting must not
+    /// silently attach to the next one.
+    ///
+    /// A value type from `Mila/Models` (`CalendarLink`), so this controller
+    /// stays EventKit-free; it neither knows what a calendar is nor decides
+    /// anything about one. Reading it is also how the live transcript pane
+    /// gets the attendee pick-list for a recording that has no row yet.
+    @Published var nextRecordingCalendarLink: CalendarLink?
+
     /// to sleep (lid close on battery, low-battery sleep, etc.). Surfaced
     /// to ContentView as an alert on the next wake so the user knows why
     /// the recording ended where it did. Cleared when the user dismisses.
@@ -1168,6 +1178,7 @@ final class QuickActionsController: ObservableObject {
             // must not leave title/folder selected for the next recording.
             nextRecordingTitle = ""
             nextRecordingFolder = nil
+            nextRecordingCalendarLink = nil
             guard ownsLivePipeline else {
                 // Nothing of the live pipeline is ours to tear down.
                 activeJob = .none
@@ -1246,8 +1257,14 @@ final class QuickActionsController: ObservableObject {
         // Same one-shot rule as the title: capture, apply, then clear so
         // the next recording in this launch does not inherit the folder.
         let chosenFolder = nextRecordingFolder
+        // Same one-shot rule as the title and folder. A synced event is not a
+        // user-typed name, so it does NOT feed `titleWasUserProvided` — the
+        // rename sheet's auto-title job is free to improve on a calendar
+        // title, which is exactly what a user syncing a 6-word invite wants.
+        let chosenCalendarLink = nextRecordingCalendarLink
         nextRecordingTitle = ""
         nextRecordingFolder = nil
+        nextRecordingCalendarLink = nil
 
         // A mic-only recording that captured zero frames produces an empty
         // WAV → empty transcript → silent ".failed". Tell the user why
@@ -1323,7 +1340,8 @@ final class QuickActionsController: ObservableObject {
             appName: appName,
             appBundleID: appBundleID,
             summary: initialSummary.isEmpty ? nil : initialSummary,
-            actionItems: initialItems.isEmpty ? nil : initialItems
+            actionItems: initialItems.isEmpty ? nil : initialItems,
+            calendarLink: chosenCalendarLink
         )
         store.add(recording)
         // The live sidecar is deliberately NOT closed here. `finish()`

@@ -76,7 +76,23 @@ final class StoredRecordingDriftTests: XCTestCase {
                                       evidence: "hi there, John here", origin: .transcript),
             ],
             untranscribedSpans: [UntranscribedSpan(start: 12, end: 15.5),
-                                 UntranscribedSpan(start: 20, end: 21, unreadable: true)]
+                                 UntranscribedSpan(start: 20, end: 21, unreadable: true)],
+            // Populated even though the mirror does NOT carry it, so the
+            // key-set check below sees the key on the app side and can demand
+            // either a mirror entry or a stated reason. A nil field here would
+            // make the tripwire blind to exactly the drift it exists to catch.
+            calendarLink: CalendarLink(
+                event: CalendarEvent(id: "EVT-1",
+                                     title: "Weekly sync",
+                                     body: "Agenda: roadmap",
+                                     start: fixtureCreated,
+                                     end: fixtureCreated.addingTimeInterval(1_800),
+                                     attendeeNames: ["Daniel", "John Doe"],
+                                     calendarTitle: "Work"),
+                includeAttendees: true,
+                includeBody: true,
+                maxAttendees: 12,
+                syncedAt: fixtureCreated)
         )
     }
 
@@ -104,6 +120,15 @@ final class StoredRecordingDriftTests: XCTestCase {
         // client present it as fact. Once accepted it IS a `speakerNames`
         // entry, which is mirrored.
         "speakerNameSuggestions",
+        // The calendar event a recording was synced with (calendar
+        // integration). Two reasons, and the second is the strong one:
+        // `attendees` is a list of people who were INVITED, which is other
+        // people's data and says nothing about who spoke — MCP exposes
+        // confirmed facts about a recording, so an invite list would read as a
+        // transcript participant list. And `eventBody` is the free-form text
+        // the user opted into sending to THEIR summariser, not to whatever
+        // client is polling the store.
+        "calendarLink",
     ]
 
     func test_fully_populated_recording_round_trips_into_stored_recording() throws {

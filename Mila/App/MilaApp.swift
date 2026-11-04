@@ -367,6 +367,19 @@ struct MilaApp: App {
     @StateObject private var obsidianExporter: ObsidianExporter
     @StateObject private var voiceMemosSettings: VoiceMemosSettings
     @StateObject private var voiceMemosImporter: VoiceMemosImporter
+    /// Settings → Calendar (`CalendarSettings`), the EventKit reader behind it
+    /// (`CalendarEventReader`), and the sync flow the calendar button opens
+    /// (`CalendarSyncController`). App-level because the button exists in the
+    /// main window AND the Settings window has to show the same access state.
+    ///
+    /// None of the three publishes at audio or timer cadence — settings on
+    /// user edits, the reader on a TCC change or a query, the controller on
+    /// sheet interaction — so holding them as App-level `@StateObject`s does
+    /// not re-create the #280 scene-churn problem. Nothing polls the calendar:
+    /// the reader is queried only when the user presses the button.
+    @StateObject private var calendarSettings: CalendarSettings
+    @StateObject private var calendarReader: CalendarEventReader
+    @StateObject private var calendarSync: CalendarSyncController
     /// Persistent, app-wide list of speaker names — the pick-list behind
     /// the transcript's speaker rename popover.
     @StateObject private var speakerDirectory: SpeakerDirectory
@@ -1017,6 +1030,25 @@ struct MilaApp: App {
                                             languageSettings: langSettings)
         _voiceMemosSettings = StateObject(wrappedValue: vmSettings)
         _voiceMemosImporter = StateObject(wrappedValue: vmImporter)
+        // Calendar integration. Nothing here touches EventKit: the reader's
+        // `EKEventStore` is lazy, so no store exists and no permission is asked
+        // for until the user opens Settings → Calendar or presses the calendar
+        // button. Same reason the app defers the microphone grant and the Voice
+        // Memos folder grant — a store built at launch is what makes macOS list
+        // the app under Privacy & Security → Calendars for a feature the user
+        // never turned on.
+        let calSettings = CalendarSettings()
+        let calReader = CalendarEventReader()
+        let calSync = CalendarSyncController(settings: calSettings,
+                                             reader: calReader,
+                                             actions: actions)
+        // Live AI reads the synced event's notes at tick time through this seam
+        // (`CalendarContextSource`), so `LiveAISession` never sees EventKit and
+        // never carries one recording's invite into the next one's prompt.
+        liveSession.calendarContextSource = calSync
+        _calendarSettings = StateObject(wrappedValue: calSettings)
+        _calendarReader = StateObject(wrappedValue: calReader)
+        _calendarSync = StateObject(wrappedValue: calSync)
         _speakerDirectory = StateObject(wrappedValue: speakerDirectory)
         _speakerIdentitySettings = StateObject(wrappedValue: speakerIdentity)
         _configImporter = StateObject(wrappedValue: configImporter)
@@ -1069,6 +1101,9 @@ struct MilaApp: App {
                 .of("obsidianExporter", obsidian),
                 .of("voiceMemosSettings", vmSettings),
                 .of("voiceMemosImporter", vmImporter),
+                .of("calendarSettings", calSettings),
+                .of("calendarReader", calReader),
+                .of("calendarSync", calSync),
                 .of("speakerIdentitySettings", speakerIdentity),
                 .of("configImporter", configImporter),
                 .of("shareImporter", shareImporter),
@@ -1136,6 +1171,9 @@ struct MilaApp: App {
                 .environmentObject(meetingDetectionSettings)
                 .environmentObject(voiceMemosSettings)
                 .environmentObject(voiceMemosImporter)
+                .environmentObject(calendarSettings)
+                .environmentObject(calendarReader)
+                .environmentObject(calendarSync)
                 .environmentObject(speakerDirectory)
                 .environmentObject(speakerIdentitySettings)
                 .environmentObject(voiceRecognitionSettings)
@@ -1270,6 +1308,9 @@ struct MilaApp: App {
                 .environmentObject(liveAISettings)
                 .environmentObject(voiceMemosSettings)
                 .environmentObject(voiceMemosImporter)
+                .environmentObject(calendarSettings)
+                .environmentObject(calendarReader)
+                .environmentObject(calendarSync)
                 .environmentObject(speakerDirectory)
                 .environmentObject(speakerIdentitySettings)
                 .environmentObject(voiceRecognitionSettings)

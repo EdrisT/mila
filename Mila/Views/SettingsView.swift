@@ -20,7 +20,7 @@ enum SettingsTab: Int, Hashable, CaseIterable, Identifiable {
     /// is technical and set once (often via a `.milaconfig` import), while the
     /// feature switches are what people come back for. Keeping them on one
     /// screen forced every feature below the fold behind a disclosure arrow.
-    case general, audio, models, aiProvider, aiFeatures, speakers, meetings, voiceMemos, storage
+    case general, audio, models, aiProvider, aiFeatures, speakers, meetings, calendar, voiceMemos, storage
 
     var id: Int { rawValue }
 
@@ -34,6 +34,7 @@ enum SettingsTab: Int, Hashable, CaseIterable, Identifiable {
         case .aiFeatures: return "AI Features"
         case .speakers: return "Speakers"
         case .meetings: return "Meetings"
+        case .calendar: return "Calendar"
         case .voiceMemos: return "Voice Memos"
         case .storage: return "Storage"
         }
@@ -48,6 +49,7 @@ enum SettingsTab: Int, Hashable, CaseIterable, Identifiable {
         case .aiFeatures: return "wand.and.stars"
         case .speakers: return "person.2"
         case .meetings: return "video.fill"
+        case .calendar: return "calendar"
         case .voiceMemos: return "waveform"
         case .storage: return "externaldrive"
         }
@@ -67,6 +69,7 @@ enum SettingsTab: Int, Hashable, CaseIterable, Identifiable {
         case .aiFeatures: return "settings.section.aiFeatures"
         case .speakers: return "settings.section.speakers"
         case .meetings: return "settings.section.meetings"
+        case .calendar: return "settings.section.calendar"
         case .voiceMemos: return "settings.section.voiceMemos"
         case .storage: return "settings.section.storage"
         }
@@ -84,7 +87,7 @@ enum SettingsTab: Int, Hashable, CaseIterable, Identifiable {
     /// two vertical scrollers, which fight each other.
     var providesOwnScrollView: Bool {
         switch self {
-        case .models, .aiProvider, .aiFeatures, .meetings, .storage:
+        case .models, .aiProvider, .aiFeatures, .meetings, .calendar, .storage:
             return true
         case .general, .audio, .speakers, .voiceMemos:
             return false
@@ -323,6 +326,7 @@ struct SettingsView: View {
         case .aiFeatures: AIFeaturesSettingsTab()
         case .speakers: DiarizationSettingsTab()
         case .meetings: MeetingsSettingsTab()
+        case .calendar: CalendarSettingsTab()
         case .voiceMemos: VoiceMemosSettingsTab()
         case .storage: StorageSettingsTab()
         }

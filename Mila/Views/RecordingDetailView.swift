@@ -609,6 +609,13 @@ struct RecordingDetailView: View {
                             // One active id per render drives BOTH the highlight and
                             // the scroll target, so they can never disagree.
                             let activeID = activeSegmentID
+                            // The invite list is identical for every row, so read
+                            // it once here instead of re-running the optional chain
+                            // per segment — and keeping the row body's expressions
+                            // few is load-bearing: this `ForEach` body is large
+                            // enough that one more inline sub-expression pushed the
+                            // type-checker past its time limit.
+                            let inviteAttendees = recording.calendarLink?.attendees ?? []
                             // Hoisted for the same reason: the row menus below
                             // are built on every render (≈30 Hz during
                             // playback), so each one may only do O(1) work.
@@ -618,8 +625,19 @@ struct RecordingDetailView: View {
                                 lineCount: recording.segments.count,
                                 selectionCount: selection.ids.count)
                             ForEach(recording.segments) { seg in
+                                // Hoisted once per row: the SAME value decides the
+                                // highlight and the scroll-probe target below, and
+                                // spelling the comparison out twice in this body is
+                                // what the type-checker choked on.
+                                let rowIsActive = seg.id == activeID
+                                // Only when the speaker has another line to keep —
+                                // see `lineCountsBySpeaker`. Hoisted so the call
+                                // below passes a Bool instead of a ternary over an
+                                // optional-chain-with-closure: this body is at the
+                                // type-checker's limit.
+                                let canSplitThisRow = (seg.speaker.map { lineCounts[$0] ?? 0 } ?? 0) > 1
                                 SegmentRow(segment: seg,
-                                           isActive: seg.id == activeID,
+                                           isActive: rowIsActive,
                                            isSelected: selection.contains(seg.id),
                                            showSpeaker: hasSpeakers,
                                            useSpeakerColor: hasMultipleSpeakers,
@@ -631,9 +649,7 @@ struct RecordingDetailView: View {
                                                store.setSpeakerName(name, forSpeaker: raw,
                                                                     recordingID: recording.id)
                                            },
-                                           // Only when the speaker has another
-                                           // line to keep — see `lineCountsBySpeaker`.
-                                           onSplit: (seg.speaker.map { lineCounts[$0] ?? 0 } ?? 0) > 1
+                                           onSplit: canSplitThisRow
                                                ? {
                                                    store.splitSegmentSpeaker(segmentID: seg.id,
                                                                              recordingID: recording.id)
@@ -654,7 +670,10 @@ struct RecordingDetailView: View {
                                                    targetName: target.displaySpeakerName(
                                                        names: recording.speakerNames,
                                                        language: recording.transcriptLanguage))
-                                           })
+                                           },
+                                           // Empty unless the user synced this recording
+                                           // to an event with attendee suggestions on.
+                                           inviteAttendees: inviteAttendees)
                                 .background {
                                     // Only the ACTIVE row publishes its frame: one
                                     // GeometryReader for the whole transcript rather
@@ -662,7 +681,11 @@ struct RecordingDetailView: View {
                                     // manual scroll ended with the highlight back on
                                     // screen. A row the LazyVStack has unloaded
                                     // publishes nothing -- correctly "not visible".
-                                    if seg.id == activeID {
+                                    // The comparison is hoisted (`rowIsActive`) for
+                                    // the same reason the arguments are plain values:
+                                    // the `background` closure type-checks as part of
+                                    // this already enormous body.
+                                    if rowIsActive {
                                         GeometryReader { geo in
                                             Color.clear.preference(
                                                 key: ActiveRowFrameKey.self,
@@ -1425,6 +1448,13 @@ private struct SegmentRow: View {
     /// The caller confirms before anything happens.
     var onRequestMerge: ((_ from: String, _ into: String) -> Void)?
 
+    /// People listed on the calendar invite this recording was synced with, if
+    /// any — offered in the rename popover under "From the meeting invite".
+    /// Passed as a plain array rather than reading the recording here, so this
+    /// row stays a value-input leaf (the reason the whole file takes closures
+    /// instead of environment objects).
+    var inviteAttendees: [String] = []
+
     /// The other speakers, resolved to what the transcript shows for them.
     private func otherSpeakers(besides raw: String) -> [SpeakerChoice] {
         allSpeakers.filter { $0 != raw }.map {
@@ -1446,6 +1476,9 @@ private struct SegmentRow: View {
                     names: speakerNames,
                     language: language,
                     color: useSpeakerColor ? raw.speakerColor(names: speakerNames) : Color.accentColor,
+                    // Pass the invite list here (declaration order of
+                    // `SpeakerLabelButton` puts it before `suffix`).
+                    inviteAttendees: inviteAttendees,
                     suffix: ":",
                     onAssign: { name in onAssignName(raw, name) },
                     onSplit: onSplit,
