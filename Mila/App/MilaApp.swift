@@ -1084,7 +1084,10 @@ struct MilaApp: App {
         // this body when it publishes, and each evaluation re-diffs every
         // scene below — see `AppSceneChurnProbe` for why that is counted.
         let _ = AppSceneChurnProbe.noteBodyEvaluation()
-        WindowGroup("Mila") {
+        // Fork change: the scene now has an explicit id so the menu bar item can
+        // raise this window with `openWindow(id:)`. `MilaWindow.mainID` is shared
+        // by both sides so the two cannot drift apart.
+        WindowGroup("Mila", id: MilaWindow.mainID) {
             ContentView()
                 .environmentObject(store)
                 .environmentObject(storageSettings)
@@ -1235,6 +1238,19 @@ struct MilaApp: App {
                 }
             }
         }
+
+        // Fork addition: a menu bar item to start/stop a recording and raise the
+        // main window from anywhere. See `MenuBarItemContent` for why it routes
+        // through `actions` (already an App-level `@StateObject`, one publish per
+        // recording) and why the label must NOT read `session.meters` (#280).
+        MenuBarExtra {
+            MenuBarItemContent()
+                .environmentObject(actions)
+        } label: {
+            Image(nsImage: MenuBarIcon.image(isRecording: actions.isRecording))
+                .renderingMode(.original)
+        }
+        .menuBarExtraStyle(.menu)
 
         Settings {
             SettingsView()
