@@ -582,12 +582,29 @@ private struct CalendarSyncToolbarItem: View {
             } label: {
                 if calendarSync.isWorking {
                     ProgressView()
-                        .controlSize(.small)
+                        // A spinner has no point size — `controlSize` is the only
+                        // lever, and it steps: `.small` (~12pt) is what the old
+                        // code drew, visibly smaller than the 18pt glyph it
+                        // stands in for, and `.large` (~32pt) overshoots the
+                        // toolbar row. `.regular` (~16pt) is the closest rung to
+                        // the icon, so the button barely changes footprint when
+                        // it swaps between the two states.
+                        .controlSize(.regular)
                 } else {
                     Image(systemName: isLinked ? "calendar.circle.fill" : "calendar")
+                        // SF Symbols size off their font, so this is the size
+                        // control (a `.frame` would only move the box). Sits a
+                        // hair above the toolbar's inherited ~13pt so the glyph
+                        // reads as an icon rather than inline text — the flag
+                        // next to it is 16pt (`LanguagePickerToolbarItem`); we
+                        // go slightly past that and stay inside the height the
+                        // toolbar row offers, past ~18pt the glyph starts being
+                        // clipped.
+                        .font(.system(size: 18))
                         .foregroundStyle(isLinked ? Color.accentColor : Color.primary)
                 }
             }
+            .padding(.horizontal, 8) // Adds just enough side breathing room to match the button to the left
             .buttonStyle(.borderless)
             .disabled(calendarSync.isWorking)
             .help(helptext)
