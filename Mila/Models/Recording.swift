@@ -118,14 +118,16 @@ struct Recording: Identifiable, Codable, Hashable {
     /// nil for any recording that ran without Live AI mode active.
     var summary: String?
 
-    /// When the transcript behind an existing summary stopped describing it —
-    /// a completed re-transcription, or a transcript edit — while the summary
-    /// itself was kept. nil means "this summary was generated from the
+    /// When the transcript behind an existing summary stopped describing it — a
+    /// completed re-transcription, and nothing else (see `markSummaryStale` for
+    /// why a transcript edit or a rename deliberately does not flag) — while the
+    /// summary itself was kept. nil means "this summary was generated from the
     /// transcript on the row" (or there is no summary at all). Set by
     /// `RecordingStore.markSummaryStale` when a pass replaces a transcript a
-    /// summary had already been written for; cleared by
-    /// `RecordingStore.clearSummaryStaleness` as part of the write that stores
-    /// a freshly generated one.
+    /// summary had already been written for; cleared in
+    /// `RecordingSummarizer.runSummary` (`current.summaryStaleAt = nil`) inside
+    /// the SAME `store.update` that stores the freshly generated summary, never
+    /// in a second write.
     ///
     /// A stored marker rather than a derived comparison because the transcript
     /// is not in the row (`fullText` lives in the sidecar `.txt`) and the
