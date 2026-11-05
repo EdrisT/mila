@@ -90,12 +90,25 @@ final class ObsidianExporterTests: XCTestCase {
                                 fullText: "long transcript here",
                                 actionItems: [action("Ship it"), action("Email Sam")])
         let md = ObsidianExporter.markdown(for: rec)
-        XCTAssertTrue(md.contains("# Team Sync"))
+        XCTAssertTrue(md.hasPrefix("We decided to ship next week."),
+                      "the body starts with the summary — no app-added `# ` heading, so frontmatter can lead")
+        XCTAssertFalse(md.contains("Team Sync"),
+                       "the title names the file, it is not written into the note")
         XCTAssertTrue(md.contains("We decided to ship next week."))
         XCTAssertTrue(md.contains("- [ ] Ship it"))
         XCTAssertTrue(md.contains("- [ ] Email Sam"))
         XCTAssertFalse(md.contains("## Transcript"),
                        "When a summary exists the transcript body is omitted")
+    }
+
+    /// The whole reason the note has no app-written `# ` heading: a summary that
+    /// opens with YAML frontmatter is only frontmatter if `---` is the very first
+    /// line of the file.
+    func test_markdown_leaves_frontmatter_on_line_one() {
+        let rec = makeRecording(summary: "---\ntags: [meeting]\n---\n\n# Team Sync\n\nShipped.")
+        let md = ObsidianExporter.markdown(for: rec)
+        XCTAssertEqual(md.components(separatedBy: "\n").first, "---",
+                       "nothing — not even a blank line — precedes the summary")
     }
 
     func test_markdown_falls_back_to_transcript_without_summary() {
@@ -265,7 +278,8 @@ final class ObsidianExporterTests: XCTestCase {
         let url = try XCTUnwrap(exporter.export(rec))
         XCTAssertTrue(FileManager.default.fileExists(atPath: url.path))
         let contents = try String(contentsOf: url, encoding: .utf8)
-        XCTAssertTrue(contents.contains("# Team Sync"))
+        XCTAssertTrue(contents.hasPrefix("S"),
+                      "the note opens with the summary, not with a `# ` heading")
         XCTAssertTrue(contents.contains("- [ ] A"))
     }
 
@@ -539,14 +553,18 @@ final class ObsidianExporterTests: XCTestCase {
 
     // MARK: - Markdown line safety
 
-    /// Headings and checklist items are line-based: a newline in a title or an
-    /// action item would otherwise split the construct.
+    /// Checklist items are line-based: a newline in an action item would
+    /// otherwise split the checkbox into loose body text. (The title never
+    /// reaches the body at all — `sanitizedTitle` handles newlines there, on the
+    /// filename side.)
     func test_markdown_flattens_newlines_in_heading_and_action_items() {
         let rec = makeRecording(title: "Team\nSync", summary: "S",
                                 actionItems: [action("Ship it\nby Friday")])
         let md = ObsidianExporter.markdown(for: rec)
         let lines = md.components(separatedBy: "\n")
-        XCTAssertEqual(lines.first, "# Team Sync")
+        XCTAssertEqual(lines.first, "S")
+        XCTAssertFalse(md.contains("Team"),
+                       "no part of the title is written into the note")
         XCTAssertTrue(lines.contains("- [ ] Ship it by Friday"))
 
         // Whatever the line ending, nothing survives that could break a

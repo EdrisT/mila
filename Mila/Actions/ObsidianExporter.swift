@@ -482,23 +482,29 @@ final class ObsidianExporter: ObservableObject {
 
     /// Markdown headings and list items are line-based constructs, so any user
     /// text placed on such a line has to be collapsed to one line first — a
-    /// newline in a title would otherwise split the `# ` heading, and one in an
-    /// action item would break the `- [ ] ` checkbox into loose body text.
+    /// newline in an action item would break the `- [ ] ` checkbox into loose
+    /// body text, and one in a title would split the `<date> <title>.md`
+    /// filename and the git commit message that quotes it.
     static func singleLine(_ raw: String) -> String {
         raw.components(separatedBy: .newlines)
             .joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Build the note body: `# title`, then the summary (or a `## Transcript`
-    /// fallback), then a `## Action items` checklist when present.
+    /// Build the note body: the summary (or a `## Transcript` fallback), then a
+    /// `## Action items` checklist when present.
+    ///
+    /// The recording title is deliberately NOT written as a leading `# ` heading:
+    /// it only names the file (`noteURL`/`preferredNoteName`). A heading on line
+    /// 1 makes any YAML frontmatter the summary itself may start with invalid,
+    /// since Obsidian only reads a `---` block at the very top of the document,
+    /// and the prompt already decides the note's own heading and layout.
     static func markdown(for recording: Recording) -> String {
-        let title = singleLine(recording.title)
-        var out = "# \(title.isEmpty ? "Untitled recording" : title)\n"
+        var sections: [String] = []
 
         let summary = (recording.summary ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !summary.isEmpty {
-            out += "\n\(summary)\n"
+            sections.append(summary)
         } else {
             let transcript = TranscriptFormatter.plainText(
                 segments: recording.segments,
@@ -506,16 +512,19 @@ final class ObsidianExporter: ObservableObject {
                 names: recording.speakerNames
             ).trimmingCharacters(in: .whitespacesAndNewlines)
             if !transcript.isEmpty {
-                out += "\n## Transcript\n\n\(transcript)\n"
+                sections.append("## Transcript\n\n\(transcript)")
             }
         }
 
         if let items = recording.actionItems, !items.isEmpty {
-            out += "\n## Action items\n\n"
-            out += items.map { "- [ ] \(singleLine($0.text))" }.joined(separator: "\n")
-            out += "\n"
+            let checklist = items.map { "- [ ] \(singleLine($0.text))" }.joined(separator: "\n")
+            sections.append("## Action items\n\n\(checklist)")
         }
-        return out
+
+        // One blank line between sections, one trailing newline, and NOTHING
+        // before the first section — so a summary that opens with frontmatter
+        // or a heading is still the first thing in the file.
+        return sections.map { $0 + "\n" }.joined(separator: "\n")
     }
 
     /// `<yyyy-MM-dd> <title>.md`, sanitized for the filesystem.
