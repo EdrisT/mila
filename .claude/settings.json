@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(xcodegen:*)",
-      "Bash(xcodebuild:*)",
-      "Bash(swift:*)"
-    ]
-  }
-}

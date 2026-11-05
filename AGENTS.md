@@ -2,6 +2,10 @@
 
 A macOS (Swift/SwiftUI) local transcription app built on whisper.cpp, with optional speaker diarization via pyannote.audio.
 
+## HARD RULES THAT YOU ALWAYS MUST OBEY:
+- Never try to build the project or run the tests - You are running in a sandbox so build/tests will fail. Only the user can build or run the tests. Ask the user and he will do it for you and return the results.
+- Do not use subagents.
+
 ## Architecture
 
 - **Build system:** XcodeGen (`project.yml` is the source of truth, not the .xcodeproj)
