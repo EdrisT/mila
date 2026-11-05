@@ -210,7 +210,7 @@ final class ShareManifestTests: XCTestCase {
         let v = try ShareManifest.decode(json).validated()
         XCTAssertEqual(v.recording.segments.map(\.text), ["ok"])
         XCTAssertEqual(v.recording.title, "Shared recording")
-        XCTAssertEqual(v.recording.language, "he")
+        XCTAssertEqual(v.recording.language, "sv")
     }
 
     // MARK: - Mapping to and from Recording
@@ -307,8 +307,11 @@ final class ShareManifestTests: XCTestCase {
 
     func test_validated_keeps_a_known_summary_language_and_drops_an_unknown_one() throws {
         var m = sampleManifest()
+        m.recording.summaryLanguage = "sv"
+        XCTAssertEqual(try m.validated().recording.summaryLanguage, "sv")
         m.recording.summaryLanguage = "he"
-        XCTAssertEqual(try m.validated().recording.summaryLanguage, "he")
+        XCTAssertNil(try m.validated().recording.summaryLanguage,
+                     "a `he` from an older sender is a language this build cannot summarise in")
         m.recording.summaryLanguage = "klingon"
         XCTAssertNil(try m.validated().recording.summaryLanguage,
                      "a language this build can't summarise in is dropped, not stored")

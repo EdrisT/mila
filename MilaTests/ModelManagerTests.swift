@@ -29,11 +29,11 @@ final class ModelManagerTests: XCTestCase {
                      sessionProtocolClasses: sessionProtocolClasses)
     }
 
-    func test_catalog_contains_ivrit_large_as_default_selected_model() {
+    func test_catalog_defaults_selection_to_the_multilingual_turbo() {
         let mgr = makeManager()
         XCTAssertNotNil(mgr.selectedModel())
-        XCTAssertEqual(mgr.selectedModelName, WhisperModel.ivritLarge.name,
-                       "Default selection should be the ivrit.ai large-v3 Hebrew model")
+        XCTAssertEqual(mgr.selectedModelName, WhisperModel.openaiTurbo.name,
+                       "Default selection must handle the language Mila offers (Swedish); the ivrit.ai finetune is Hebrew-only")
         XCTAssertEqual(WhisperModel.all.contains { $0.name.contains("ivrit") },
                        true,
                        "Expected at least one ivrit.ai model in the catalog")
@@ -124,6 +124,15 @@ final class ModelManagerTests: XCTestCase {
         XCTAssertEqual(WhisperModel.bestModel(for: "iw"), .ivritLarge)
         XCTAssertEqual(WhisperModel.bestModel(for: "en"), .openaiTurbo)
         XCTAssertEqual(WhisperModel.bestModel(for: "auto"), .openaiTurbo)
+    }
+
+    /// The local catalog deliberately survived the Hebrew → Swedish swap: no
+    /// Swedish finetune ships here, so Swedish (the app's primary language now)
+    /// resolves to the multilingual turbo, and a legacy `"he"` code still finds
+    /// the ivrit finetune for anyone who kept it installed.
+    func test_best_model_for_language_routes_swedish_to_multilingual_turbo() {
+        XCTAssertEqual(WhisperModel.bestModel(for: "sv"), .openaiTurbo)
+        XCTAssertEqual(WhisperModel.bestModel(for: "sv-SE"), .openaiTurbo)
     }
 
     func test_model_for_language_falls_back_to_selected_when_best_not_installed() throws {
@@ -302,7 +311,9 @@ final class ModelManagerTests: XCTestCase {
         XCTAssertFalse(mgr.hasPersistedSelection,
                        "A catalog default is not a user choice — launch-time bootstrap "
                        + "uses this to tell 'never picked' from 'picked this'")
-        XCTAssertEqual(mgr.selectedModelName, WhisperModel.ivritLarge.name)
+        // Swedish-first catalog: the default must be the multilingual turbo,
+        // since the ivrit.ai finetune can only serve Hebrew (a retired option).
+        XCTAssertEqual(mgr.selectedModelName, WhisperModel.openaiTurbo.name)
     }
 
     func test_persisted_selection_is_remembered_across_reload() {

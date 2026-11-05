@@ -109,18 +109,19 @@ struct LiveAIRecordingView: View {
     private var liveTranscriptIsSaved: Bool { liveAISettings.useVAD }
 
     /// RTL for the AI pane (summary + action items). The AI output is its
-    /// own language setting; for `.auto` we detect from the actual emitted
-    /// text — summary + ALL item texts combined — so a short individual
-    /// item with an embedded English name ("…ל-Cursor") doesn't mis-detect
-    /// while its neighbours are clearly Hebrew. One verdict for the whole
-    /// pane keeps every row aligned the same way. Drives EXPLICIT
+    /// own language setting, and Swedish — like English — is LTR, so only
+    /// `.auto` can end up right-to-left: a legacy recording still set to
+    /// `"he"`, whose AI text is Hebrew. For that case we detect from the
+    /// actual emitted text — summary + ALL item texts combined — so a short
+    /// individual item with an embedded English name ("…ל-Cursor") doesn't
+    /// mis-detect while its neighbours are clearly Hebrew. One verdict for the
+    /// whole pane keeps every row aligned the same way. Drives EXPLICIT
     /// `.trailing` alignment (never `\.layoutDirection`) — see the live
     /// transcript pane: flipping layoutDirection mis-measured inside the
     /// split view / open sidebar and shoved Hebrew to the left.
     private var aiOutputIsRTL: Bool {
         switch liveAISettings.outputLanguage {
-        case .hebrew: return true
-        case .english: return false
+        case .swedish, .english: return false
         case .auto:
             if language == "he" { return true }
             let combined = aiSession.summary + " "

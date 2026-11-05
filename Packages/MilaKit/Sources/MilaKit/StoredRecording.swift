@@ -185,15 +185,24 @@ public struct StoredRecording: Codable, Identifiable, Sendable {
     /// MCP client the fuzzy half and withhold the exact half.
     public var appBundleID: String?
     public var summary: String?
+    /// The moment a re-transcription replaced the transcript `summary` was
+    /// generated from — the row keeps the old overview, this says it no longer
+    /// describes the text on disk. nil means the summary matches (or there is
+    /// none). Mirrored because an MCP client reading `summary` has no other way
+    /// to tell a current overview from a stale one: the app flags it in its UI,
+    /// the helper would present the same string as if it were fresh.
+    public var summaryStaleAt: Date?
     public var actionItems: [ActionItem]?
     /// Raw diarizer ID (`SPEAKER_00`) → user-assigned display name.
     public var speakerNames: [String: String]
     /// The app's per-recording override of the language its `summary` and
-    /// `actionItems` are written in (`"he"` / `"en"`), when the user set
+    /// `actionItems` are written in (`"sv"` / `"en"`), when the user set
     /// one; nil means the app's global output-language setting applied.
     /// Kept as a string so a language the app adds later doesn't fail the
-    /// decode. Mirrored because the app persists it — not exposed by any
-    /// tool today (the summary text speaks for itself).
+    /// decode — which is also what keeps a `"he"` left on a recording made
+    /// before Hebrew was dropped as an option readable. Mirrored because the
+    /// app persists it — not exposed by any tool today (the summary text
+    /// speaks for itself).
     public var summaryLanguage: String?
     /// Display name of the Mila user who shared this recording as a
     /// `.milashare` bundle; nil for recordings this Mac captured itself.
@@ -268,7 +277,7 @@ public struct StoredRecording: Codable, Identifiable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case id, title, createdAt, duration, source, audioFileName,
              status, language, modelName, segments, deletedAt, folder, appName,
-             summary, actionItems, speakerNames, appBundleID, summaryLanguage,
+             summary, summaryStaleAt, actionItems, speakerNames, appBundleID, summaryLanguage,
              sharedBy, sharedAt, transcriptionDeferredAt, retranscriptionPriorState,
              untranscribedSpans
         case legacyFullText = "fullText"
@@ -291,6 +300,7 @@ public struct StoredRecording: Codable, Identifiable, Sendable {
         appName = try c.decodeIfPresent(String.self, forKey: .appName)
         appBundleID = try c.decodeIfPresent(String.self, forKey: .appBundleID)
         summary = try c.decodeIfPresent(String.self, forKey: .summary)
+        summaryStaleAt = try c.decodeIfPresent(Date.self, forKey: .summaryStaleAt)
         actionItems = try c.decodeIfPresent([ActionItem].self, forKey: .actionItems)
         speakerNames = try c.decodeIfPresent([String: String].self, forKey: .speakerNames) ?? [:]
         summaryLanguage = try c.decodeIfPresent(String.self, forKey: .summaryLanguage)
@@ -311,7 +321,7 @@ public struct StoredRecording: Codable, Identifiable, Sendable {
                 language: String = "en", modelName: String? = nil, segments: [Segment] = [],
                 deletedAt: Date? = nil, folder: String? = nil, appName: String? = nil,
                 appBundleID: String? = nil,
-                summary: String? = nil, actionItems: [ActionItem]? = nil,
+                summary: String? = nil, summaryStaleAt: Date? = nil, actionItems: [ActionItem]? = nil,
                 speakerNames: [String: String] = [:], summaryLanguage: String? = nil,
                 sharedBy: String? = nil, sharedAt: Date? = nil,
                 transcriptionDeferredAt: Date? = nil,
@@ -333,6 +343,7 @@ public struct StoredRecording: Codable, Identifiable, Sendable {
         self.appName = appName
         self.appBundleID = appBundleID
         self.summary = summary
+        self.summaryStaleAt = summaryStaleAt
         self.actionItems = actionItems
         self.speakerNames = speakerNames
         self.summaryLanguage = summaryLanguage

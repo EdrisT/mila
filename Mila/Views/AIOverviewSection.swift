@@ -32,11 +32,22 @@ struct AIOverviewSection: View {
     /// through gets no entry.
     var onRegenerateSummary: (() -> Void)? = nil
     /// Forces the "Summarizing…" spinner UI without requiring an
-    /// existing summary string — used while a regenerate / backfill
-    /// is in flight on a recording that has nothing yet (so
-    /// `summary` is nil but we still want feedback that work is
-    /// happening).
+    /// existing summary string — used while a Summarize / Regenerate call
+    /// is in flight on a recording that has nothing yet (so `summary` is nil
+    /// but we still want feedback that work is happening).
     var isSummarizing: Bool = false
+    /// Wire this for a recording that has NO summary yet and CAN get one: the
+    /// block then renders as an offer — a "Summarize" button — instead of
+    /// disappearing. Since #3934 a summary is something you ask for, so the way
+    /// to ask has to sit where the answer would appear. nil (the rename sheet)
+    /// keeps the old behaviour: with nothing to show, the block shows nothing.
+    var onSummarize: (() -> Void)? = nil
+    /// True when the summary on show was generated from an EARLIER transcript —
+    /// the row's `summaryStaleAt` is set, which a completed re-transcription
+    /// writes. Shows a one-line notice so an out-of-date overview is never read
+    /// as current, plus a visible Regenerate button: the decision to spend
+    /// another provider call stays with the user.
+    var summaryIsStale: Bool = false
     /// Whether the per-block "Copy summary" / "Copy action items"
     /// header buttons are shown. The rename sheet keeps them (default
     /// `true`); the detail view hides them — it consolidates copy into
@@ -69,7 +80,7 @@ struct AIOverviewSection: View {
     /// in the rename sheet or an empty header strip in the detail
     /// view).
     var hasContent: Bool {
-        (summary?.isEmpty == false) || !items.isEmpty || isSummarizing
+        (summary?.isEmpty == false) || !items.isEmpty || isSummarizing || onSummarize != nil
     }
 
     private var sectionIsRTL: Bool {
@@ -99,6 +110,8 @@ struct AIOverviewSection: View {
                 let summaryText = summary ?? ""
                 if !summaryText.isEmpty || isSummarizing {
                     summaryView(summaryText)
+                } else if onSummarize != nil {
+                    summarizeOfferView()
                 }
                 if !items.isEmpty {
                     actionItemsView()
@@ -126,6 +139,22 @@ struct AIOverviewSection: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                if summaryIsStale, let onRegenerateSummary {
+                    // Visible next to the notice, not only in the right-click
+                    // menu: this is the moment the user is most likely to want a
+                    // fresh overview, and finding it in a context menu is a
+                    // hunt.
+                    Button("Regenerate") {
+                        onRegenerateSummary()
+                    }
+                    .controlSize(.small)
+                    .disabled(isSummarizing || isTranscribing)
+                    .help("Write a new summary from the transcript now on this recording")
+                    // Distinct from the context-menu entry's id: both exist on a
+                    // stale row at once, and one identifier matching two controls
+                    // makes any later UI test ambiguous.
+                    .accessibilityIdentifier("detail.summary.regenerateButton")
+                }
                 Spacer(minLength: 8)
                 if showsBlockCopyButtons, !text.isEmpty {
                     // One-click copy of the whole summary. The selectable
@@ -150,6 +179,15 @@ struct AIOverviewSection: View {
             // "Copy" affordance plus a labelled "Copy summary" option,
             // and — when the caller wired it — a "Regenerate summary"
             // entry that re-runs the LLM against the current transcript.
+            if summaryIsStale {
+                Label("This summary was written before the transcript was re-transcribed, so it may not match what is below.",
+                      systemImage: "clock.arrow.circlepath")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: sectionIsRTL ? .trailing : .leading)
+                    .accessibilityIdentifier("detail.summary.stale")
+            }
             if !text.isEmpty {
                 // Render with structure: a single run-on paragraph (the
                 // live rolling summary) becomes one bullet per sentence so
@@ -186,9 +224,8 @@ struct AIOverviewSection: View {
                         }
                     }
             } else if isSummarizing {
-                // Backfill case: no summary text yet, but a CLI call
-                // is in flight. A placeholder line gives the user
-                // something to point at while waiting.
+                // No summary text yet, but a call is in flight. A placeholder
+                // line gives the user something to point at while waiting.
                 Text("Generating summary…")
                     .font(.callout)
                     .italic()
@@ -196,6 +233,27 @@ struct AIOverviewSection: View {
                     .frame(maxWidth: .infinity, alignment: sectionIsRTL ? .trailing : .leading)
                     .multilineTextAlignment(sectionIsRTL ? .trailing : .leading)
             }
+        }
+    }
+
+    /// The empty state that offers work: shown when the recording has no
+    /// summary, nothing is in flight, and the caller can start a summary.
+    private func summarizeOfferView() -> some View {
+        HStack(spacing: 8) {
+            Label("AI Overview", systemImage: "sparkles")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.tint)
+            Text("No summary yet.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Button("Summarize") {
+                onSummarize?()
+            }
+            .controlSize(.small)
+            .disabled(isSummarizing || isTranscribing)
+            .help("Ask your provider for an AI Overview of this transcript")
+            .accessibilityIdentifier("detail.summary.summarize")
         }
     }
 

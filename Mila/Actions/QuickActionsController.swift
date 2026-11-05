@@ -371,9 +371,10 @@ final class QuickActionsController: ObservableObject {
     /// Late-bound by MilaApp. When the live-transcript path saves a
     /// recording directly (skipping `transcription.enqueue` because the
     /// VAD path already produced segments), TranscriptionService's
-    /// `onTranscriptionCompleted` hook never fires — so the summary
-    /// trigger has to run from here instead. The enqueue path leans on
-    /// the hook in TranscriptionService and doesn't touch this.
+    /// `onTranscriptionCompleted` hook never fires — so the ONE remaining
+    /// automatic summary call (finishing a Live AI recording's rolling summary,
+    /// see `finalizeTail`) has to be made from here instead. Nothing else here
+    /// summarizes: a summary is an explicit user action since #3934.
     var summarizer: RecordingSummarizer?
 
     /// Late-bound by MilaApp. Enforces the storage cap at record start:
@@ -382,16 +383,16 @@ final class QuickActionsController: ObservableObject {
     var storageSettings: RecordingStorageSettings?
 
     /// Late-bound by MilaApp. Obsidian vault destination + exporter. The
-    /// live-transcript save path (below) mirrors the batch path's Obsidian
-    /// wiring: mark the fresh completion pending so the summarizer's
-    /// completion hook writes the note once the summary is ready.
+    /// live-transcript save path (below) mirrors the batch path: the note is
+    /// written straight from the transcript, since there is no automatic summary
+    /// whose completion the write could wait for (#3934).
     var obsidianSettings: ObsidianVaultSettings?
     var obsidianExporter: ObsidianExporter?
 
     /// Late-bound by MilaApp, which hands ownership here. Same reason as the
     /// summarizer above: the live-transcript save path never reaches
-    /// `TranscriptionService.onTranscriptionCompleted`, so it marks its fresh
-    /// completion for speaker-name suggestions itself (issue #348).
+    /// `TranscriptionService.onTranscriptionCompleted`, so it runs speaker-name
+    /// suggestions itself once the speakers are final (issue #348).
     var speakerNameSuggester: SpeakerNameSuggester?
 
     /// Active silence-watch task — cancelled when the recording stops so
@@ -1935,28 +1936,31 @@ final class QuickActionsController: ObservableObject {
                 // and the m4a transcode below, neither of which touches the
                 // transcript's speakers. (Issue #211.)
                 self.transcription.endSpeakerFinalization(id)
-                // Mark this fresh completion pending for Obsidian export (if
-                // enabled) BEFORE kicking the summarizer, since a skip fires
-                // the completion hook synchronously.
+                // Obsidian: file the note HERE, from the transcript. There is no
+                // automatic summary to wait for any more (#3934), so the note no
+                // longer sits behind the summarizer's completion hook. If the
+                // user later presses Summarize / Regenerate, that hook re-writes
+                // the same note with the overview in it.
                 let obsidianOn = (self.obsidianSettings?.enabled == true)
                     && (self.obsidianSettings?.vaultURL != nil)
-                // Likewise before the summarizer: its completion hook is what
-                // runs the speaker-name suggester, and a skip fires it
-                // synchronously. Speakers are final at this point. Without a
-                // summarizer nothing would ever consume the mark, so run the
-                // suggester directly instead.
-                if self.summarizer != nil {
-                    self.speakerNameSuggester?.markPending(updated.id)
-                } else {
-                    self.speakerNameSuggester?.suggest(recordingID: updated.id)
-                }
+                if obsidianOn { self.obsidianExporter?.export(updated) }
+                // Speaker names are final at this point, so ask for suggestions
+                // now — nothing has to settle first. The suggester gates itself
+                // on `isSpeakerNameSuggestionReady`, so this is a no-op without a
+                // configured provider or with the switch off.
+                self.speakerNameSuggester?.suggest(recordingID: updated.id)
+                // Live AI ONLY. `stopRecording` no longer awaits the final
+                // Live-AI tick inline (island-io/mila#86), so the rolling summary
+                // snapshotted onto the row can be a throttle-interval stale —
+                // missing the tail of the conversation. Regenerate from the FULL
+                // transcript here, under the same enabled + configured conditions
+                // the removed inline tick used. That completes work the feature
+                // already paid for during the meeting, which is why it stays
+                // automatic; every other recording gets NO summary from here —
+                // that's an explicit action now (#3934).
                 if self.liveAISettings?.enabled == true,
                    self.llmSettings?.isConfigured == true {
-                    if obsidianOn { self.obsidianExporter?.markPending(updated.id) }
                     self.summarizer?.regenerate(updated)
-                } else {
-                    if obsidianOn { self.obsidianExporter?.markPending(updated.id) }
-                    self.summarizer?.summarizeIfNeeded(updated)
                 }
                 // Shrink storage: the live transcript is authoritative and the
                 // rediarize above is done reading the WAV, so transcode it to

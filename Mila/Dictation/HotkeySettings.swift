@@ -16,6 +16,7 @@ final class HotkeySettings: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        Self.migrateLegacyKeys(in: defaults)
         var initial: [HotkeyAction: HotkeyBinding] = [:]
         for action in HotkeyAction.allCases {
             if let stored = Self.load(action: action, from: defaults) {
@@ -48,6 +49,24 @@ final class HotkeySettings: ObservableObject {
     }
 
     // MARK: - Storage
+
+    /// One-off rename of a persisted key, for when a `HotkeyAction` case is
+    /// renamed: `rawValue` IS the storage key, so `dictateHebrew` →
+    /// `dictateSwedish` would otherwise silently throw away a user's custom
+    /// binding and hand them back the compiled-in default.
+    ///
+    /// Only fills the new key when it is still empty — the new key is the live
+    /// one, so a binding the user set after the upgrade wins. The old key is
+    /// removed either way, which also makes the migration idempotent.
+    private static func migrateLegacyKeys(in defaults: UserDefaults) {
+        let oldKey = "hotkey.dictateHebrew"
+        let newKey = "hotkey.\(HotkeyAction.dictateSwedish.rawValue)"
+        if defaults.data(forKey: newKey) == nil,
+           let legacy = defaults.data(forKey: oldKey) {
+            defaults.set(legacy, forKey: newKey)
+        }
+        defaults.removeObject(forKey: oldKey)
+    }
 
     private static func key(action: HotkeyAction) -> String {
         "hotkey.\(action.rawValue)"

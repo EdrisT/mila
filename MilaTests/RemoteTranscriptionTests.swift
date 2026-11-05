@@ -368,6 +368,10 @@ final class RemoteTranscriptionSettingsTests: XCTestCase {
 
         let suite = UserDefaults(suiteName: "RemoteTranscriptionSettingsTests.\(#function)")!
         suite.removePersistentDomain(forName: "RemoteTranscriptionSettingsTests.\(#function)")
+        // Start local on purpose — this fork's default backend is remote, and a
+        // remote start legitimately loads the token in `init`, which would make
+        // the `== ""` below vacuous.
+        suite.set(TranscriptionBackend.local.rawValue, forKey: "transcription.backend")
         let settings = RemoteTranscriptionSettings(defaults: suite, apiKeyKeychainKey: key)
         XCTAssertEqual(settings.apiKey, "")
 

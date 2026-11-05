@@ -11,7 +11,7 @@ private let dictationLog = Logger(subsystem: "io.island.whisper.IslandWhisper",
 /// Press the bound hotkey to start a dictation in that language. Press the same
 /// hotkey again to stop, transcribe, and paste at the cursor.
 ///
-/// English and Hebrew each have their own global hotkey (configurable in the
+/// English and Swedish each have their own global hotkey (configurable in the
 /// Settings UI; defaults `⌘2` and `⌘3`). Pressing the *other* language's
 /// hotkey while one is in flight is ignored — the user has to stop the active
 /// one first to avoid mid-sentence language flips that produce garbage
@@ -22,10 +22,10 @@ final class DictationController: ObservableObject {
 
     @Published private(set) var state: State = .idle
     @Published private(set) var level: Float = 0
-    /// The language of the *most recent* dictation, exposed so the toolbar
-    /// button can label itself ("Dictate · EN" / "Dictate · HE"). Defaults
-    /// to Hebrew on a fresh install to preserve the pre-rename UX.
-    @Published private(set) var lastLanguage: String = "he"
+    /// The language of the *most recent* dictation, exposed so the dictation
+    /// overlay can align its live text for that language. Defaults to Swedish,
+    /// the primary language on a fresh install.
+    @Published private(set) var lastLanguage: String = "sv"
 
     private let recorder = MicrophoneRecorder()
     private var samples: [Float] = []

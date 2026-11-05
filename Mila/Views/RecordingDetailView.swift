@@ -84,6 +84,16 @@ struct RecordingDetailView: View {
                 onRegenerateSummary: canRegenerateSummary
                     ? { summarizer.regenerate(recording) }
                     : nil,
+                // The offer, shown only when a call would actually do something:
+                // `shouldSummarize` is the summarizer's own predicate (provider
+                // configured + transcript non-empty + no summary yet), so the
+                // button cannot appear on a row where pressing it does nothing.
+                // A summary is a deliberate action since #3934 — nothing writes
+                // one when a recording finishes.
+                onSummarize: summarizer.shouldSummarize(recording)
+                    ? { summarizer.summarizeIfNeeded(recording) }
+                    : nil,
+                summaryIsStale: recording.summaryIsStale,
                 summaryLanguage: recording.summaryLanguageOverride,
                 globalOutputLanguage: liveAI.outputLanguage,
                 onSetSummaryLanguage: canRegenerateSummary
@@ -942,7 +952,7 @@ struct RecordingDetailView: View {
     /// when there is one to replace and the user has summaries on. Otherwise
     /// the confirmation says the summary is left as it is.
     private var trimRegeneratesOverview: Bool {
-        hasOverviewToCopy && llmSettings.isConfigured && llmSettings.summaryEnabled
+        hasOverviewToCopy && llmSettings.isConfigured
     }
 
     private func trimConfirmationMessage(for edit: PendingTranscriptEdit) -> String {
@@ -1269,13 +1279,20 @@ private struct AIOverviewBanner: View {
     let items: [ActionItem]
     let recordingLanguage: String
     /// Forwarded to `AIOverviewSection` so the summary block shows a
-    /// "Summarizing…" spinner while a regenerate / backfill call is in
-    /// flight.
+    /// "Summarizing…" spinner while a Summarize / Regenerate call is in flight.
     var isSummarizing: Bool = false
     /// Forwarded to `AIOverviewSection`'s context-menu wiring. nil
     /// hides the "Regenerate summary" item (e.g. when no LLM is
     /// configured or the transcript is empty).
     var onRegenerateSummary: (() -> Void)? = nil
+    /// Forwarded to `AIOverviewSection`: the "Summarize" offer for a recording
+    /// that has no summary yet. nil hides it. Declared AFTER `onRegenerateSummary`
+    /// because that is the order the call site passes them in — a memberwise
+    /// initialiser requires arguments in declaration order.
+    var onSummarize: (() -> Void)? = nil
+    /// Forwarded to `AIOverviewSection`: the "written from an earlier
+    /// transcript" notice on a summary a re-transcription invalidated.
+    var summaryIsStale: Bool = false
     /// Forwarded to `AIOverviewSection` for its "Summary language" submenu.
     var summaryLanguage: RecordingLanguage? = nil
     var globalOutputLanguage: LiveAISettings.OutputLanguage = .auto
@@ -1290,6 +1307,8 @@ private struct AIOverviewBanner: View {
             recordingLanguage: recordingLanguage,
             onRegenerateSummary: onRegenerateSummary,
             isSummarizing: isSummarizing,
+            onSummarize: onSummarize,
+            summaryIsStale: summaryIsStale,
             // The detail view consolidates copy into two location-based
             // buttons (Summary+Action-items up top, transcript in the
             // transcript area), so the per-block header copy buttons are
@@ -1328,7 +1347,7 @@ private struct AIOverviewBanner: View {
 /// own — see `SpeakerNameSuggestion`.
 private struct SpeakerNameSuggestionsBanner: View {
     let suggestions: [SpeakerNameSuggestion]
-    /// Transcript language, for the "Speaker A" / "דובר א׳" label.
+    /// Transcript language, for the "Speaker A" / "Talare A" label.
     let language: String
     let onAccept: (SpeakerNameSuggestion) -> Void
     let onDismiss: (SpeakerNameSuggestion) -> Void
@@ -1426,7 +1445,7 @@ private struct SegmentRow: View {
     /// distinct speaker across the recording.
     let useSpeakerColor: Bool
     /// Recording's language so we can render the raw `SPEAKER_00`
-    /// label from pyannote as `Speaker A` / `דובר א׳` in the user's
+    /// label from pyannote as `Speaker A` / `Talare A` in the user's
     /// language — matching the labels the live view + post-recording
     /// action items already show.
     let language: String
@@ -1468,7 +1487,7 @@ private struct SegmentRow: View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             // Speaker prefix sits TIGHT against the text — fixed-width
             // columns introduced a gap (~30 pt) between the friendly
-            // label "Speaker A" / "דובר א׳" and the actual content.
+            // label "Speaker A" / "Talare A" and the actual content.
             // `fixedSize` keeps the label at its natural width.
             if showSpeaker, let raw = segment.speaker, !raw.isEmpty {
                 SpeakerLabelButton(

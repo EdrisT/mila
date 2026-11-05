@@ -498,21 +498,13 @@ final class LiveAISession: ObservableObject {
         let snapshot = latestTranscript
         let tool = llmSettings.tool
         let exe = llmSettings.executablePath.isEmpty ? nil : llmSettings.executablePath
-        // When the user picks `.auto`, detect Hebrew vs English from the
-        // transcript itself rather than passing the abstract phrase
-        // "match the transcript language" through to the LLM — Claude
-        // / cursor-agent obey concrete instructions ("Output in Hebrew")
-        // far more consistently than they obey introspective ones.
-        let promptLanguageName: String = {
-            switch liveAISettings.outputLanguage {
-            case .auto:
-                return snapshot.isPredominantlyHebrew ? "Hebrew" : "English"
-            case .english:
-                return "English"
-            case .hebrew:
-                return "Hebrew"
-            }
-        }()
+        // `.auto` passes "the same language as the transcript below" straight
+        // to the model rather than being resolved to one concrete language
+        // here. It used to be resolved by counting Hebrew vs Latin letters, but
+        // that only worked because Hebrew is a different script; Swedish and
+        // English are not distinguishable that way, and a wrong guess would
+        // have been silent (same reasoning as `RecordingSummarizer.promptLanguageName`).
+        let promptLanguageName = liveAISettings.outputLanguage.promptName
         // Read the per-meeting notes at TICK time, not at `start()` — a
         // meeting-detector auto-start beats the user to the pane, so the
         // agenda usually gets pasted a minute into the recording. The
@@ -539,8 +531,15 @@ final class LiveAISession: ObservableObject {
             lastTranscriptSent = ""
         }
         let prompt = Self.promptWithContext(
-            liveAISettings.prompt
-                .replacingOccurrences(of: "{{LANGUAGE}}", with: promptLanguageName),
+            // Live mode substitutes only `{{LANGUAGE}}`. The summary path's
+            // calendar/transcript variables are deliberately not offered here:
+            // live context arrives through `promptWithContext`, which LABELS
+            // each block with where it came from (the user's own notes vs an
+            // invite someone else wrote) — a slot the user places blind would
+            // arrive unlabelled, and that is the exact confusion the labels
+            // exist to prevent.
+            PromptTemplate.render(liveAISettings.prompt,
+                                  values: [PromptVariable.language.rawValue: promptLanguageName]),
             context: context)
         // OpenAI-compatible ticks use the endpoint's model name from
         // `LLMSettings.openAIModelName`; CLI ticks use Live AI's model override.

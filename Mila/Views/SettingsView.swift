@@ -936,7 +936,7 @@ private struct ModelsSettingsTab: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Whisper models")
                 .font(.headline)
-            Text("English dictation uses the OpenAI turbo model; Hebrew uses ivrit.ai. Both download automatically on first launch (~1.6 GB each). The optional ivrit.ai large model is higher accuracy but ~2× slower.")
+            Text("Dictation and voice memos use the OpenAI large-v3-turbo model, which handles English and Swedish — download it below (~1.6 GB). The optional ivrit.ai large model is a Hebrew-only finetune: ~2× slower, and only worth installing if you still transcribe Hebrew.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -1507,6 +1507,11 @@ private struct AIPromptEditor: View {
     var minHeight: CGFloat = 90
     /// One line, under the editor.
     var caption: String?
+    /// The `{{VARIABLE}}` slots this prompt substitutes, listed under the
+    /// caption. Rendered from `PromptVariable` itself rather than typed into
+    /// the caption, so the settings text cannot advertise a token the code
+    /// does not fill in (or hide one it does).
+    var variables: [PromptVariable] = []
     var isEnabled = true
 
     /// Survives the re-renders that recreate the editor struct, so the undo
@@ -1545,7 +1550,39 @@ private struct AIPromptEditor: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: aiCaptionWidth, alignment: .leading)
             }
+            if !variables.isEmpty {
+                PromptVariableList(variables: variables)
+            }
         }
+    }
+}
+
+/// The `{{VARIABLE}}` slots a prompt supports, listed under its editor.
+///
+/// Generated from `PromptVariable.allCases` rather than written out as prose in
+/// the caption: a list a human maintains next to a prompt editor is a list that
+/// silently loses a token, and a token that is not substituted is a token the
+/// model reads literally.
+private struct PromptVariableList: View {
+    let variables: [PromptVariable]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Variables")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            ForEach(variables, id: \.rawValue) { variable in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(verbatim: variable.token)
+                        .font(.system(.caption, design: .monospaced))
+                    Text(variable.blurb)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .frame(maxWidth: aiCaptionWidth, alignment: .leading)
     }
 }
 
@@ -1841,11 +1878,16 @@ private struct AIProviderSettingsTab: View {
 
 /// Settings → AI Features. What the AI does for you, one row per feature.
 ///
-/// Each row carries a title, a single line of description and a real switch,
-/// so the state of all four features is legible — and changeable — without
-/// opening anything. Clicking anywhere else on the row expands that feature's
-/// prompt editor and its own options. See `AIFeatureRow` for why the switch
-/// and the expand target cannot be the same view.
+/// Each feature row carries a title, a single line of description and a real
+/// switch, so the state of every switchable feature is legible — and changeable
+/// — without opening anything. Clicking anywhere else on the row expands that
+/// feature's prompt editor and its own options. See `AIFeatureRow` for why the
+/// switch and the expand target cannot be the same view.
+///
+/// The summary row is the exception that has no switch: since #3934 a summary is
+/// made by pressing "Summarize" / "Regenerate summary" on a recording (or by Live
+/// AI while recording), so there is no automatic behaviour left to switch off —
+/// only the prompt those actions send.
 private struct AIFeaturesSettingsTab: View {
     @EnvironmentObject private var settings: LLMSettings
     @EnvironmentObject private var liveAI: LiveAISettings
@@ -1866,25 +1908,25 @@ private struct AIFeaturesSettingsTab: View {
                 outputLanguageRow
                 Divider()
 
-                AIFeatureRow(title: "Automatic summary",
-                             caption: "Summarize every recording when it finishes.",
-                             help: "Mila runs a one-shot LLM pass after each recording and stores the result as that recording's AI Overview. Turning this off keeps the summaries you already have; any recording that has one can be refreshed from its right-click \u{201C}Regenerate summary\u{201D} action.",
-                             isOn: $settings.summaryEnabled,
-                             toggleIdentifier: "llm.summary.enabled.toggle",
+                AIFeatureRow(title: "Summary prompt",
+                             caption: "What Mila sends when you ask it to summarize a recording.",
+                             help: "Used by \u{201C}Summarize\u{201D} and \u{201C}Regenerate summary\u{201D} on a recording, and by Live AI, which summarizes continuously while you record. Mila no longer summarizes on its own when a recording finishes: that fired once when the transcript landed and again seconds later, when speaker identification finished, so every meeting cost two provider calls and threw the first summary away. Nothing is sent until you ask.",
                              identifier: "ai.section.summary",
                              isExpanded: $showSummary) {
                     AIPromptEditor(title: "Summary prompt",
                                    text: $liveAI.summaryPrompt,
                                    defaultText: LiveAISettings.defaultSummaryPrompt,
-                                   // The editor governs the SUMMARY only.
-                                   // `RecordingSummarizer.promptWithActionItems`
-                                   // appends the action-items request at send
-                                   // time, so say so here rather than letting a
-                                   // user wonder where the extra list came
-                                   // from — or delete it from their own prompt
-                                   // and find it still arriving.
-                                   caption: "Sent with the full transcript. Mila also asks for the action items alongside it. `{{LANGUAGE}}` becomes the output language above.",
-                                   isEnabled: settings.summaryEnabled)
+                                   // This prompt IS the whole request now. Mila
+                                   // used to append its own English paragraphs
+                                   // to it — the action-items contract, a
+                                   // language directive, a labelled calendar
+                                   // block — none of which could be edited or
+                                   // removed. Say what is substituted instead,
+                                   // and where the one remaining automatic
+                                   // piece still lands, so nobody hunts for the
+                                   // text they can see in the model's output.
+                                   caption: "Everything the model is told comes from this text. The variables below are filled in before sending; without `{{TRANSCRIPT}}` in the prompt, Mila appends the transcript after it. The transcript shows each turn's speaker — your assigned name, or \"Speaker A\" when you assigned none. `{{CALENDAR_ATTENDEES}}` is who was *invited*; `{{SPEAKERS}}` is who actually spoke. To get items in the Action Items list, ask for a line reading ###ACTION_ITEMS### followed by a JSON array.",
+                                   variables: PromptVariable.allCases)
                 }
                 Divider()
 
@@ -2075,6 +2117,14 @@ private struct AIFeaturesSettingsTab: View {
     /// (`RecordingSummarizer` and `LiveAISession` read the same
     /// `LiveAISettings.outputLanguage`). The persisted key
     /// (`liveAI.outputLanguage`) is unchanged.
+    ///
+    /// It is now the ONLY way that knob reaches the model. `RecordingSummarizer`
+    /// used to also append its own "Write the summary and every action item in
+    /// X" line, so the picker bit even on a prompt with no token in it — and a
+    /// user could not get rid of that line. Both defaults ship the token; a
+    /// custom prompt that drops it decides the language from its own wording,
+    /// which is what the caption says rather than promising a control that no
+    /// longer exists.
     private var outputLanguageRow: some View {
         // Wider than `aiLabelWidth`: this label has no field rows to line up
         // with on this tab, and "Output language" would truncate at 80.
@@ -2097,8 +2147,10 @@ private struct AIFeaturesSettingsTab: View {
             .font(.callout)
             // Names the features that actually substitute `{{LANGUAGE}}`
             // (summary + action items, Live AI) — the name prompt and the
-            // Send action never did, so "every feature below" was wrong.
-            Text("Language of the summary, action items and Live AI output. Auto follows what was spoken. Right-click a recording to pick a different language for just that one.")
+            // Send action never did, so "every feature below" was wrong. And
+            // since the summarizer no longer states the language in its own
+            // appended text, say plainly that the token is what carries it.
+            Text("Language of the summary, action items and Live AI output — substituted into `{{LANGUAGE}}` in those prompts, so a prompt that removes the token sets its own language. Auto follows what was spoken. Right-click a recording to pick a different language for just that one.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

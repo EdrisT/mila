@@ -97,7 +97,7 @@ item still appears exactly ONCE.
 
 An action item is:
 - A concrete task someone committed to do (with or without a deadline).
-- An explicit instruction directed at you (e.g. "Mila, add ..." or in Hebrew "מילה, הוסף..."). Tag those with source: "voice_command".
+- An explicit instruction directed at you (e.g. "Mila, add ..." or in Swedish "Mila, lägg till..."). Tag those with source: "voice_command".
 
 OUTPUT FORMAT: respond with ONLY a JSON object on a single line - no preamble, no Markdown, no trailing text:
 {"summary": "...", "items": [{"id": "stable-slug", "text": "...", "speaker": "SPEAKER_00" or null, "timestamp_seconds": 0, "source": "inferred" or "voice_command"}]}
@@ -107,8 +107,14 @@ If the call has just started and there is no transcript yet, output {"summary": 
 
 
 def language_token(text: str) -> str:
-    """Pick "Hebrew" if the fixture is >50% Hebrew letters, else
-    English. Mirrors LiveAISession's auto-detection."""
+    """Pick "Hebrew" if the fixture is >50% Hebrew letters, else English.
+
+    NO LONGER a mirror of `LiveAISettings.OutputLanguage.auto`, which since the
+    Hebrew -> Swedish swap substitutes a pass-through instruction ("the same
+    language as the transcript below") instead of naming a language. This token
+    only says which language the FIXTURE is in, which is what the mock/asserts
+    here need; a Swedish fixture would need its own name here.
+    """
     hebrew = sum(1 for c in text if 0x0590 <= ord(c) <= 0x05FF)
     latin = sum(1 for c in text if c.isalpha() and ord(c) < 0x0590)
     return "Hebrew" if hebrew > latin else "English"

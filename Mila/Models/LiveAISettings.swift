@@ -154,12 +154,12 @@ final class LiveAISettings: ObservableObject {
     /// a STRICT JSON object containing a rolling summary plus a list of
     /// action items so we can parse without a free-text regex. The
     /// prompt also defines wake-word semantics: anything the speaker
-    /// says directly to "Mila" (or "מילה") becomes an item tagged
-    /// `source: "voice_command"`.
+    /// says directly to "Mila" ("Mila, add a note for me") becomes an item
+    /// tagged `source: "voice_command"`.
     ///
     /// The literal token `{{LANGUAGE}}` in the prompt is replaced at
     /// send time with the user's chosen output language ("English" or
-    /// "Hebrew"). Two reasons it lives in the prompt rather than as an
+    /// "Swedish"). Two reasons it lives in the prompt rather than as an
     /// instruction layered on top: (1) it makes the prompt itself
     /// editable in Settings without losing the language directive, and
     /// (2) keeping the substitution token visible reminds users not to
@@ -243,20 +243,26 @@ final class LiveAISettings: ObservableObject {
     enum OutputLanguage: String, CaseIterable, Identifiable {
         case auto = "auto"
         case english = "en"
-        case hebrew = "he"
+        case swedish = "sv"
 
         var id: String { rawValue }
 
-        /// Name we substitute into the prompt's `{{LANGUAGE}}` slot. For
-        /// `.auto` we tell the LLM to match whichever language the
-        /// transcript itself is in — that's the right default since
-        /// most users won't change the setting and a meeting in Hebrew
-        /// shouldn't get English action items.
+        /// Name we substitute into the prompt's `{{LANGUAGE}}` slot.
+        ///
+        /// `.auto` passes the instruction through verbatim — "the same language
+        /// as the transcript below" — rather than resolving it here to one of
+        /// the two concrete names. It used to resolve by script (count Hebrew vs
+        /// Latin letters, `isPredominantlyHebrew`) because that was cheap and
+        /// reliable; with Swedish as the other language there is no script
+        /// difference to count, and guessing Swedish-vs-English from the text is
+        /// a guess we'd rather the model make than one Mila makes wrongly and
+        /// silently. Legacy `"he"` values in `liveAI.outputLanguage` therefore
+        /// decode to `.auto` (`init`), which is the safe reading.
         var promptName: String {
             switch self {
             case .auto:    return "the same language as the transcript below"
             case .english: return "English"
-            case .hebrew:  return "Hebrew"
+            case .swedish: return "Swedish"
             }
         }
 
@@ -264,7 +270,7 @@ final class LiveAISettings: ObservableObject {
             switch self {
             case .auto:    return "Auto"
             case .english: return "English"
-            case .hebrew:  return "Hebrew"
+            case .swedish: return "Swedish"
             }
         }
     }
@@ -326,17 +332,32 @@ final class LiveAISettings: ObservableObject {
             defaults.set(migrated, forKey: Keys.simThreshold)
             defaults.set(true, forKey: Keys.simThresholdMigrated)
         }
-        self.prompt = defaults.string(forKey: Keys.prompt) ?? Self.defaultPrompt
+        // Same migration as `summaryPrompt` below: a nil value (never set) or
+        // an exact match of the shipped English default adopts the Swedish one;
+        // anything else is a user customisation and is preserved untouched. A
+        // pure read — nothing is written back — so it is idempotent.
+        let storedPrompt = defaults.string(forKey: Keys.prompt)
+        if let stored = storedPrompt, stored != Self.legacyPromptV1 {
+            self.prompt = stored
+        } else {
+            self.prompt = Self.defaultPrompt
+        }
         let langRaw = defaults.string(forKey: Keys.outputLanguage) ?? OutputLanguage.auto.rawValue
         self.outputLanguage = OutputLanguage(rawValue: langRaw) ?? .auto
-        // Migrate users still on the pre-1.8.x concise default up to the
-        // richer `defaultSummaryPrompt`. A nil value (never set) or an exact
-        // match of the old default both adopt the new default; any other
-        // value is a user customisation and is preserved as-is. Idempotent:
-        // the migration is a pure read (we don't write the default back), so
-        // a later prompt revision can migrate the same way.
+        // Migrate users still on a shipped English default up to the Swedish
+        // one (`legacySummaryPromptV1` = the pre-1.8.x concise text, `V2` = the
+        // thorough English text that shipped until the Swedish default). A nil
+        // value (never set) or an exact match of either adopts the new default;
+        // any other value is a user customisation and is preserved as-is —
+        // which matters more here than it used to, because the prompt is now
+        // the ENTIRE request: overwriting something a user tuned for Obsidian
+        // would be destructive in a way appending a paragraph never was.
+        // Idempotent: the migration is a pure read (we don't write the default
+        // back), so a later prompt revision can migrate the same way.
         let storedSummaryPrompt = defaults.string(forKey: Keys.summaryPrompt)
-        if let stored = storedSummaryPrompt, stored != Self.legacySummaryPromptV1 {
+        if let stored = storedSummaryPrompt,
+           stored != Self.legacySummaryPromptV1,
+           stored != Self.legacySummaryPromptV2 {
             self.summaryPrompt = stored
         } else {
             self.summaryPrompt = Self.defaultSummaryPrompt
@@ -349,19 +370,122 @@ final class LiveAISettings: ObservableObject {
     /// a different model name.
     static let defaultModel = "claude-sonnet-4-6"
 
-    /// The default prompt. Idempotent: we re-send the full growing
-    /// transcript on every tick and the model re-emits the FULL list
-    /// (plus the latest rolling summary) every time, so the UI always
-    /// gets a complete snapshot. Dedup happens in Swift via the `id`
-    /// field on each item.
+    /// The default Live-AI tick prompt. Swedish, because the model's output
+    /// is read by the user in the middle of a meeting and the shipped default
+    /// should ask for it in the language the app now ships with. The OUTPUT
+    /// FORMAT paragraph stays English: the JSON keys, the `source` enum values
+    /// and the `SPEAKER_00` id are protocol with `LiveAISession.parseEnvelope`
+    /// / `parseActionItems`, and translating the words around them is safe
+    /// while translating those is not.
     ///
-    /// `{{LANGUAGE}}` is substituted with the user's chosen output
-    /// language at send time. If a user removes it from a custom prompt
-    /// the LLM falls back to whatever language the transcript itself
-    /// is in — fine for matching the conversation, but the user picked
-    /// a setting for a reason, so we keep the substitution token in
-    /// the default text.
+    /// Idempotent: we re-send the full growing transcript on every tick and the
+    /// model re-emits the FULL list (plus the latest rolling summary) every
+    /// time, so the UI always gets a complete snapshot. Dedup happens in Swift
+    /// via the `id` field on each item.
+    ///
+    /// `{{LANGUAGE}}` is substituted with the user's chosen output language at
+    /// send time (`PromptTemplate`). If a user removes it from a custom prompt
+    /// the LLM falls back to whatever language the transcript itself is in —
+    /// fine for matching the conversation, but the user picked a setting for a
+    /// reason, so we keep the substitution token in the default text.
     static let defaultPrompt = """
+Du är Mila, en live-assistent för möten. Skriv allt på {{LANGUAGE}}.
+
+Du anropas upprepade gånger medan mötet pågår. Varje anrop ger dig mer
+transkribering. Ditt svar ERSÄTER hela den panel användaren ser, så du
+MÅSTE skicka med HELA det aktuella läget vid varje anrop:
+  • HELA listan med åtgärdspunkter — varje punkt du någonsin tagit fram,
+    inte bara de nya.
+  • HELA den löpande sammanfattningen — skriv om den så att den täcker
+    hela samtalet så här långt, inte bara det senaste avsnittet.
+
+Behanda varje svar som om det föregående svaret inte längre finns. Anta
+inte att användaren kom ihåg något från tidigare anrop. Upprepa varje
+åtgärdspunkt, med sin stabila id, i varje svar. Ser du att en tidigare
+punkt var fel, utelämna den helt (användarens panel speglar det). Vill du
+uppdatera en punkt, skicka den igen med SAMMA id och ny text. Upprepar
+någon sig finns punkten ändå med exakt EN gång.
+
+En åtgärdspunkt är:
+- En konkret uppgift någon förbundit sig att göra (med eller utan deadline).
+- En uttrycklig instruktion riktad till dig (t.ex. "Mila, lägg till ..."). Märk sådana med source: "voice_command".
+
+UTDATAFORMAT: svara med ENDAST ett JSON-objekt på en enda rad — ingen \
+inledning, ingen Markdown, ingen efterföljande text:
+{"summary": "...", "items": [{"id": "stable-slug", "text": "...", "speaker": "SPEAKER_00" or null, "timestamp_seconds": 0, "source": "inferred" or "voice_command"}]}
+
+Har anropet precis börjat och det ännu inte finns någon transkribering, \
+skicka {"summary": "", "items": []}.
+"""
+
+    /// The default one-shot summary prompt. Plain text, meeting-style: this
+    /// runs ONCE against the complete transcript after a recording finishes.
+    ///
+    /// It governs the WHOLE request now. `RecordingSummarizer` used to append
+    /// its own English paragraphs to whatever the user wrote — an action-items
+    /// contract, a language directive, a labelled calendar block — none of
+    /// which could be edited, translated or removed. Those are `{{VARIABLE}}`
+    /// slots now: `{{LANGUAGE}}`, `{{EVENT_TITLE}}`, `{{CALENDAR_ATTENDEES}}`,
+    /// `{{CALENDAR_NOTES}}`, and the transcript itself via `{{TRANSCRIPT}}`
+    /// (absent here, in which case Mila appends it, as it always has).
+    ///
+    /// Depth deliberately matches the pre-#87 live summary: an overview, the
+    /// main topics with their key points, decisions made, and — when the
+    /// conversation centres on specific people / projects / items — a per-item
+    /// breakdown so each one's situation and next steps are clear.
+    static let defaultSummaryPrompt = """
+Sammanfatta mötet i transkriptionen nedan. Skriv allt på {{LANGUAGE}}.
+
+Skriv en grundlig sammanfattning åt någon som inte deltog. Täcka:
+  • En kort övergripande beskrivning av vad mötet handlade om.
+  • De viktigaste ämnena som diskuterades, med huvudpoängerna för varje.
+  • De beslut som fattades.
+  • När samtalet kretsar kring specifika personer, projekt eller ärenden,
+    bryt ner per person/ärende så att läget och nästa steg blir tydliga.
+
+Använd korta stycken eller punktlistor och **fetstil** på viktiga namn och
+ämnen så går sammanfattningen att skumma. Var utförlig men upprepa dig
+inte. Skriv ingen inledning som "Här kommer sammanfattningen" — börja
+direkt med innehållet.
+
+Mötesinbjudan — skriven före mötet, ofta av någon annan. Tomma fält betyder
+att ingen inbjudan är kopplad, eller att användaren höll den privat. Använd
+inbjudan bara som kontext för namn, stavning och ämnen: sammanfatta den
+inte, gör den inte till åtgärdspunkter och rapportera inget från den som
+transkriptionen inte nämner.
+Titel: {{EVENT_TITLE}}
+Inbjudna: {{CALENDAR_ATTENDEES}}
+Anteckningar: {{CALENDAR_NOTES}}
+
+Röster som hördes i inspelningen — de namn du gett rösterna, i annat fall
+Talare A, Talare B: {{SPEAKERS}}
+Den som är inbjuden men inte hörs deltog inte — tillskriv den personen inget.
+"""
+
+    /// The pre-1.8.x concise default. Kept verbatim so `init` can migrate a
+    /// user still on the old default up to `defaultSummaryPrompt` without
+    /// clobbering a genuinely customised prompt. Do not edit — changing it
+    /// would break the migration match. (Retire once enough releases have
+    /// passed that no one is on the old default.)
+    static let legacySummaryPromptV1 = """
+You are summarizing a meeting transcript. Output everything in {{LANGUAGE}}.
+
+Read the transcript below and produce a concise summary suitable for
+someone who didn't attend the meeting. Cover:
+  • What was discussed (the main topics).
+  • Any decisions that were made.
+  • Any action items or follow-ups that came up.
+
+Keep it short — a few bullet points or a short paragraph is fine. Do
+NOT include a preamble like "Here is the summary"; start directly with
+the content.
+"""
+
+    /// The pre-Swedish English live-tick default, kept verbatim so `init` can
+    /// tell "this is the stock prompt" from "the user wrote this" and migrate
+    /// only the former. Do not edit — changing it breaks the migration match.
+    /// (Retire once enough releases have passed that no one is on it.)
+    static let legacyPromptV1 = """
 You are Mila, a live meeting assistant. Output everything in {{LANGUAGE}}.
 
 You are called repeatedly as a live meeting unfolds. Each call gives
@@ -383,7 +507,7 @@ item still appears exactly ONCE.
 
 An action item is:
 - A concrete task someone committed to do (with or without a deadline).
-- An explicit instruction directed at you (e.g. "Mila, add ..." or in Hebrew "מילה, הוסף..."). Tag those with source: "voice_command".
+- An explicit instruction directed at you (e.g. "Mila, add ..." or in Swedish "Mila, lägg till..."). Tag those with source: "voice_command".
 
 OUTPUT FORMAT: respond with ONLY a JSON object on a single line — no \
 preamble, no Markdown, no trailing text:
@@ -393,18 +517,9 @@ If the call has just started and there is no transcript yet, output \
 {"summary": "", "items": []}.
 """
 
-    /// Default one-shot summary prompt. Plain-text, meeting-style — this
-    /// runs ONCE against the full transcript after a recording finishes, so
-    /// the prompt can assume the model has the complete picture. The one-shot
-    /// caller (`RecordingSummarizer`) appends the action-items contract at
-    /// send time, so this prompt only governs the SUMMARY content/style.
-    /// `{{LANGUAGE}}` is substituted at send time.
-    ///
-    /// Depth deliberately matches the pre-#87 live summary: an overview, the
-    /// main topics with their key points, decisions made, and — when the
-    /// conversation centres on specific people / projects / items — a
-    /// per-item breakdown so each one's situation and next steps are clear.
-    static let defaultSummaryPrompt = """
+    /// The pre-Swedish English one-shot summary default, kept verbatim for the
+    /// same reason as `legacyPromptV1`. Do not edit.
+    static let legacySummaryPromptV2 = """
 You are summarizing a meeting transcript. Output everything in {{LANGUAGE}}.
 
 Write a thorough summary for someone who did not attend. Cover:
@@ -421,24 +536,6 @@ yourself. Do NOT include a preamble like "Here is the summary"; start
 directly with the content.
 """
 
-    /// The pre-1.8.x concise default. Kept verbatim so `init` can migrate a
-    /// user still on the old default up to `defaultSummaryPrompt` without
-    /// clobbering a genuinely customised prompt. Do not edit — changing it
-    /// would break the migration match. (Retire once enough releases have
-    /// passed that no one is on the old default.)
-    static let legacySummaryPromptV1 = """
-You are summarizing a meeting transcript. Output everything in {{LANGUAGE}}.
-
-Read the transcript below and produce a concise summary suitable for
-someone who didn't attend the meeting. Cover:
-  • What was discussed (the main topics).
-  • Any decisions that were made.
-  • Any action items or follow-ups that came up.
-
-Keep it short — a few bullet points or a short paragraph is fine. Do
-NOT include a preamble like "Here is the summary"; start directly with
-the content.
-"""
 
     private enum Keys {
         static let enabled = "liveAI.enabled"

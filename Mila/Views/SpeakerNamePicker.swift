@@ -17,7 +17,7 @@ struct SpeakerChoice: Identifiable, Equatable {
 /// completed-recording detail view and the live transcript pane — the
 /// caller decides where the assignment lands via `onAssign`.
 struct SpeakerNamePicker: View {
-    /// Resolved default label ("Speaker A" / "דובר א׳") shown in the
+    /// Resolved default label ("Speaker A" / "Talare A") shown in the
     /// reset row when a custom name is currently assigned.
     let defaultLabel: String
     /// Name currently assigned to this speaker, nil when unnamed.

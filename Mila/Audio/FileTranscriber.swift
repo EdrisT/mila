@@ -10,7 +10,7 @@ enum FileTranscriber {
 
     static func importFile(at sourceURL: URL,
                            into store: RecordingStore,
-                           language: RecordingLanguage = .hebrew,
+                           language: RecordingLanguage = .swedish,
                            source: RecordingSource = .systemAudio,
                            title titleOverride: String? = nil,
                            createdAt: Date? = nil,

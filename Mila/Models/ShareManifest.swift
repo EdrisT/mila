@@ -124,6 +124,11 @@ struct ShareManifest: Codable, Equatable {
         /// rather than fall back to their global setting. `validated()`
         /// drops a value this build cannot summarise in.
         var summaryLanguage: String?
+        /// `Recording.summaryStaleAt` — the moment a re-transcription replaced the
+        /// transcript this `summary` was written from. It travels with the summary
+        /// text because a receiver must not read an out-of-date overview as
+        /// current; without it the shared copy looks fresher than the sender's.
+        var summaryStaleAt: Date?
 
         /// `TranscriptSegment` without its `id`: that UUID exists to give
         /// SwiftUI lists a stable identity and is regenerated on import.
@@ -204,7 +209,8 @@ struct ShareManifest: Codable, Equatable {
         init(id: UUID, title: String, createdAt: Date, duration: Double, source: String,
              language: String, modelName: String?, appName: String?, appBundleID: String?,
              segments: [Segment], speakerNames: [String: String], summary: String?,
-             actionItems: [ActionItem]?, summaryLanguage: String? = nil) {
+             actionItems: [ActionItem]?, summaryLanguage: String? = nil,
+             summaryStaleAt: Date? = nil) {
             self.id = id
             self.title = title
             self.createdAt = createdAt
@@ -219,11 +225,13 @@ struct ShareManifest: Codable, Equatable {
             self.summary = summary
             self.actionItems = actionItems
             self.summaryLanguage = summaryLanguage
+            self.summaryStaleAt = summaryStaleAt
         }
 
         private enum CodingKeys: String, CodingKey {
             case id, title, createdAt, duration, source, language, modelName, appName,
-                 appBundleID, segments, speakerNames, summary, actionItems, summaryLanguage
+                 appBundleID, segments, speakerNames, summary, summaryStaleAt,
+                 actionItems, summaryLanguage
         }
 
         init(from decoder: Decoder) throws {
@@ -233,7 +241,7 @@ struct ShareManifest: Codable, Equatable {
             createdAt = try c.decode(Date.self, forKey: .createdAt)
             duration = try c.decodeIfPresent(Double.self, forKey: .duration) ?? 0
             source = try c.decodeIfPresent(String.self, forKey: .source) ?? ""
-            language = try c.decodeIfPresent(String.self, forKey: .language) ?? "he"
+            language = try c.decodeIfPresent(String.self, forKey: .language) ?? "sv"
             modelName = try c.decodeIfPresent(String.self, forKey: .modelName)
             appName = try c.decodeIfPresent(String.self, forKey: .appName)
             appBundleID = try c.decodeIfPresent(String.self, forKey: .appBundleID)
@@ -242,6 +250,7 @@ struct ShareManifest: Codable, Equatable {
             summary = try c.decodeIfPresent(String.self, forKey: .summary)
             actionItems = try c.decodeIfPresent([ActionItem].self, forKey: .actionItems)
             summaryLanguage = try c.decodeIfPresent(String.self, forKey: .summaryLanguage)
+            summaryStaleAt = try? c.decodeIfPresent(Date.self, forKey: .summaryStaleAt) ?? nil
         }
 
         /// The names this recording's transcript actually uses, in
@@ -433,7 +442,8 @@ extension ShareManifest.RecordingPayload {
                            timestampSeconds: $0.timestampSeconds,
                            source: $0.source.rawValue, addedAt: $0.addedAt)
             },
-            summaryLanguage: recording.summaryLanguage
+            summaryLanguage: recording.summaryLanguage,
+            summaryStaleAt: recording.summaryStaleAt
         )
     }
 
@@ -463,6 +473,7 @@ extension ShareManifest.RecordingPayload {
             appName: appName,
             appBundleID: appBundleID,
             summary: summary,
+            summaryStaleAt: summaryStaleAt,
             // Module-qualified: inside this extension `ActionItem` is the
             // payload's nested DTO, not the app's model.
             actionItems: actionItems?.map {

@@ -308,6 +308,17 @@ public struct MilaMCPToolHandlers: Sendable {
         if (args["include_summary"] as? Bool) ?? true {
             if let summary = recording.summary, !summary.isEmpty {
                 result["summary"] = summary
+                // Set when a re-transcription replaced the transcript this
+                // overview was written from. The app shows a matching notice;
+                // without the key a client would quote a summary of text that no
+                // longer exists as though it described the transcript it just
+                // fetched. Since summaries are only ever made on request now, a
+                // re-transcribed row keeps its old summary until the user asks
+                // for a new one — so this is the normal state of such a row, not
+                // an error.
+                if let staleAt = recording.summaryStaleAt {
+                    result["summary_stale_at"] = iso(staleAt)
+                }
             }
             if let items = recording.actionItems, !items.isEmpty {
                 result["action_items"] = items.map { item in

@@ -248,15 +248,15 @@ final class RecordingStoreTests: XCTestCase {
         // A change the caller's snapshot (`rec`) does not know about.
         store.rename(rec, to: "Weekly sync")
 
-        let updated = store.setSummaryLanguage("he", recordingID: rec.id)
-        XCTAssertEqual(updated?.summaryLanguage, "he")
+        let updated = store.setSummaryLanguage("sv", recordingID: rec.id)
+        XCTAssertEqual(updated?.summaryLanguage, "sv")
         XCTAssertEqual(updated?.title, "Weekly sync",
                        "the live row is returned, not the caller's snapshot")
         XCTAssertEqual(updated?.audioFileName, "sync.wav")
         XCTAssertEqual(updated?.status, .pending)
 
         let reloaded = RecordingStore(rootDirectory: tempRoot)
-        XCTAssertEqual(reloaded.recordings.first?.summaryLanguage, "he")
+        XCTAssertEqual(reloaded.recordings.first?.summaryLanguage, "sv")
         XCTAssertEqual(reloaded.recordings.first?.title, "Weekly sync")
 
         // nil clears it, and the cleared state persists too.

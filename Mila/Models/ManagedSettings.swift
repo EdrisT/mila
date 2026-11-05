@@ -350,16 +350,18 @@ extension ManagedSettings {
         return true
     }
 
-    /// A language code an administrator may lock: `he`/`iw`/`en` or a regional
-    /// form (`en-US`, `he_IL`). Stricter than `RecordingLanguage.fromCode`, which
-    /// reads anything unknown as Hebrew — right for legacy recordings, wrong for
-    /// a lock, where a typo would silently pin every user to Hebrew. Unknown
-    /// values are dropped (and logged) instead.
+    /// A language code an administrator may lock: `sv`/`en` or a regional
+    /// form (`sv-SE`, `en-US`). Stricter than `RecordingLanguage.fromCode`, which
+    /// reads anything unknown as Swedish — right for legacy recordings, wrong
+    /// for a lock, where a typo would silently pin every user to Swedish.
+    /// Unknown values are dropped (and logged) instead. A retired `he`/`iw`
+    /// profile value lands in that drop, exactly like the app's own reading of
+    /// it: Hebrew is no longer a language Mila offers.
     static func strictLanguage(_ code: String) -> RecordingLanguage? {
         let normalized = code.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let base = normalized.split(whereSeparator: { $0 == "-" || $0 == "_" }).first.map { String($0) } ?? ""
         switch base {
-        case "he", "iw": return .hebrew
+        case "sv": return .swedish
         case "en": return .english
         default: return nil
         }

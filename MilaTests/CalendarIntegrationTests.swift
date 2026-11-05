@@ -108,11 +108,11 @@ final class CalendarIntegrationTests: XCTestCase {
 
     func test_limitedAttendees_dedupesDropsBlanksCapsAndSorts() {
         let names = ["Yaron", "dana", "", "  Dana  ", "Noa", "Mika", "Or", "Rivka", "Shai",
-                     "Tamar", "Udi", "Vera", "Wendy"]
+                     "Tamar", "Udi", "Vera", "Wendy", "Avi"]
         let capped = CalendarEvent.limitedAttendees(names)
         XCTAssertEqual(capped.count, CalendarEvent.attendeeCeiling,
                        "the safety ceiling must bound a company-wide invite")
-        XCTAssertEqual(Set(capped.map(\.lowercased())).count, capped.count,
+        XCTAssertEqual(Set(capped.map { $0.lowercased() }).count, capped.count,
                        "case-insensitive duplicates must collapse")
         XCTAssertFalse(capped.contains { $0.isEmpty })
         XCTAssertEqual(capped, capped.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending })
@@ -195,10 +195,14 @@ final class CalendarIntegrationTests: XCTestCase {
         XCTAssertEqual(minimal.syncedAt, minimal.startsAt,
                        "no syncedAt falls back to the start rather than a bogus now")
 
+        // Built outside the literal: 500 quoted names in one interpolation is
+        // where the escaping of the previous version went wrong, and a nested
+        // string inside a nested interpolation is not worth re-litigating.
+        let attendeeFlood = (0..<500).map { "\"Person \($0)\"" }.joined(separator: ",")
         let flooded = try decoder.decode(CalendarLink.self, from: Data(
             """
             {"eventTitle":"Town hall","startsAt":"2023-11-14T22:13:20Z","endsAt":"2023-11-14T23:13:20Z",
-             "attendees":[\((0..<500).map { "\"Person \\($0)\"" }.joined(separator: ","))],
+             "attendees":[\(attendeeFlood)],
              "eventBody":"\(String(repeating: "y", count: 9_000))"}
             """.utf8))
         XCTAssertEqual(flooded.attendees.count, CalendarLink.maxStoredAttendees,
@@ -240,8 +244,8 @@ final class CalendarIntegrationTests: XCTestCase {
                                                              includeBody: true,
                                                              maxAttendees: 12,
                                                              syncedAt: t0))
-        let decoded = try storeDecoder().decode(Recording.self,
-                                               from: try storeEncoder().encode([recording]))
+        let decoded = try storeDecoder().decode([Recording].self,
+                                                from: try storeEncoder().encode([recording]))
         XCTAssertEqual(decoded.first?.calendarLink?.summaryNotes, "Agenda: roadmap")
         XCTAssertEqual(decoded.first?.calendarLink?.attendees, ["Dana"])
     }
@@ -271,26 +275,41 @@ final class CalendarIntegrationTests: XCTestCase {
         XCTAssertTrue(both.contains("CALENDAR INVITE"))
         XCTAssertTrue(both.contains("Q3 review"), "the model is told which event the notes came from")
         XCTAssertTrue(both.contains("Agenda: roadmap"))
-        XCTAssertLessThan(both.range(of: "NOTES THE USER")!, both.range(of: "CALENDAR INVITE")!,
+        XCTAssertLessThan(both.range(of: "NOTES THE USER")!.lowerBound,
+                          both.range(of: "CALENDAR INVITE")!.lowerBound,
                           "the user's own notes lead, the invite follows")
     }
 
-    func test_summaryPrompt_appendsEventNotesOnlyWhenConsented() {
-        let base = "Summarise this meeting."
-        XCTAssertEqual(RecordingSummarizer.promptWithCalendarNotes(base, link: nil), base)
+    /// The hard-coded event block is gone: the invite is now variables the user
+    /// places in their own prompt, in their own language. What is OFFERED is
+    /// unchanged — it reads the stored link, which records what the sync agreed
+    /// to send, so a `regenerate` months later still cannot widen it.
+    func test_summaryPromptVariables_carryOnlyWhatTheSyncConsentedTo() {
+        var rec = Recording(title: "Standup", source: .microphone, audioFileName: "s.wav",
+                            fullText: "vi diskuterade roadmapen")
 
-        let noBody = CalendarLink(event: event(body: ""), includeAttendees: true,
-                                  includeBody: true, maxAttendees: 12, syncedAt: t0)
-        XCTAssertEqual(RecordingSummarizer.promptWithCalendarNotes(base, link: noBody), base,
-                       "an event with no notes adds nothing")
+        // No link at all: every calendar variable is the EMPTY string, never a
+        // placeholder word — "unknown" is a string a model can restate as fact.
+        var values = RecordingSummarizer.promptValues(for: rec,
+                                                      languageName: "Swedish",
+                                                      transcript: rec.fullText)
+        XCTAssertEqual(values["EVENT_TITLE"], "")
+        XCTAssertEqual(values["CALENDAR_ATTENDEES"], "")
+        XCTAssertEqual(values["CALENDAR_NOTES"], "")
 
-        let link = CalendarLink(event: event(body: "Agenda: roadmap"), includeAttendees: false,
-                                includeBody: true, maxAttendees: 12, syncedAt: t0)
-        let composed = RecordingSummarizer.promptWithCalendarNotes(base, link: link)
-        XCTAssertTrue(composed.hasPrefix(base), "the user's own prompt stays intact and first")
-        XCTAssertTrue(composed.contains("Agenda: roadmap"))
-        XCTAssertTrue(composed.contains("written BEFORE the meeting"),
-                      "the guard rail against summarising the agenda is the point of the block")
+        rec.calendarLink = CalendarLink(event: event(body: "Agenda: roadmap"),
+                                        includeAttendees: false,
+                                        includeBody: true,
+                                        maxAttendees: 12, syncedAt: t0)
+        values = RecordingSummarizer.promptValues(for: rec,
+                                                  languageName: "Swedish",
+                                                  transcript: rec.fullText)
+        XCTAssertEqual(values["CALENDAR_NOTES"], "Agenda: roadmap",
+                       "the body the user opted into is offered verbatim")
+        XCTAssertEqual(values["CALENDAR_ATTENDEES"], "",
+                       "attendees kept private at sync time stay private")
+        XCTAssertFalse((values["EVENT_TITLE"] ?? "").isEmpty,
+                       "the event title is offered now — the user decides whether to use it")
     }
 
     // MARK: - The one-shot name prefill

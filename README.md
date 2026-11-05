@@ -1,11 +1,10 @@
 # Mila
 
 A native macOS app that records, dictates, and transcribes locally on your Mac
-— no audio leaves the device. Hebrew transcription is powered by the
-[ivrit.ai `large-v3` finetune](https://huggingface.co/ivrit-ai/whisper-large-v3-ggml)
-of Whisper, English by
-[OpenAI's `large-v3-turbo`](https://huggingface.co/ggerganov/whisper.cpp), both
-running through `whisper.cpp` (GPU via Metal).
+— no audio leaves the device. It works in two languages, **Swedish** and
+**English**, both running through `whisper.cpp` (GPU via Metal): on-device with
+[OpenAI's `large-v3-turbo`](https://huggingface.co/ggerganov/whisper.cpp), or on
+a transcription server you point it at.
 
 **Download:** [island-io.github.io/mila](https://island-io.github.io/mila/)
 
@@ -17,14 +16,14 @@ running through `whisper.cpp` (GPU via Metal).
 - **Record meetings** = mic + system audio mixed into one mono 16 kHz WAV file.
 - **Dictate in two languages** with separate global hotkeys:
     - `⌘2` — English dictation (OpenAI `large-v3-turbo`)
-    - `⌘3` — Hebrew dictation (ivrit.ai `large-v3`)
+    - `⌘3` — Swedish dictation (OpenAI `large-v3-turbo`)
   Both hotkeys are user-configurable in **Settings → General**.
-- **Transcribe on-device** with ivrit.ai `large-v3` (Hebrew) or OpenAI
-  `large-v3-turbo` (English / multilingual). Audio never leaves your Mac.
+- **Transcribe on-device** with OpenAI `large-v3-turbo`, which handles Swedish,
+  English and every other supported language. Audio never leaves your Mac.
 - **Transcribe on a remote server** — point Mila at any OpenAI-compatible
   `/v1/audio/transcriptions` endpoint (OpenAI's hosted Whisper API, or a
   self-hosted server) via **Settings → Models → Backend**. Useful on
-  lower-powered Macs or when you want a Hebrew model too large to run locally.
+  lower-powered Macs or when you want a model too large to run locally.
   See [Setting up a remote transcription server](#remote-transcription-optional).
 - **Speaker diarization** — identifies who said what, displayed as color-coded
   per-speaker labels. **Name your speakers**: rename labels to real names from
@@ -54,7 +53,8 @@ running through `whisper.cpp` (GPU via Metal).
 - **Transcription queue** — view queued, in-progress, and recently-deleted jobs;
   stop or remove any item from the queue at any time.
 - **SRT export** (including mid-recording), per-segment timestamps, click to seek,
-  copy/share transcript, RTL rendering for Hebrew.
+  copy/share transcript, RTL rendering for right-to-left transcripts (still
+  used by recordings made in Hebrew before the switch to Swedish).
 - **Auto-discard accidental clips** — very short recordings with no speech are
   dropped automatically (threshold configurable in **Settings → Storage**).
 - **Opt into pre-release builds** via **Settings → General → Updates**.
@@ -67,13 +67,14 @@ To **run** Mila:
 - **Apple Silicon (M-series) strongly recommended.** Transcription runs on the
   Metal GPU (`whisper.cpp`) and speaker diarization on MPS/CPU (pyannote). Intel
   Macs fall back to CPU and are much slower.
-- **Disk:** ~4.6 GB for the two default Whisper models, downloaded on first
-  launch (ivrit.ai `large-v3` ~3.0 GB + OpenAI `large-v3-turbo` ~1.6 GB). Add
+- **Disk:** ~1.6 GB for the Whisper model the app uses by default (OpenAI
+  `large-v3-turbo`); the optional Hebrew ivrit.ai `large-v3` finetune adds ~3.0
+  GB. Add
   ~1 GB more if you enable speaker diarization (bundled Python runtime plus a
   torch download on first enable).
 - **Memory (approximate):** 16 GB unified memory recommended. 8 GB is workable
-  for plain transcription but tight with diarization. Rough working set: Hebrew
-  `large-v3` ~3.5–4 GB, English `large-v3-turbo` ~1.5–2 GB, speaker diarization
+  for plain transcription but tight with diarization. Rough working set: `large-v3-turbo`
+  ~1.5–2 GB (the optional Hebrew `large-v3` ~3.5–4 GB), speaker diarization
   adds ~1–2 GB. (RAM figures are approximate guidance, not a hard spec.)
 - **Live (real-time) mode** — running transcription and diarization concurrently
   in real time is the heaviest path. It's **automatically disabled on MacBook
@@ -108,16 +109,17 @@ release. The checksum is pinned in `Packages/WhisperBinary/Package.swift`.
 
 ## Models
 
-On first launch the app downloads both default models in the background:
+Mila transcribes with these Whisper models. Nothing is downloaded for you —
+pick them in **Settings → Models** (or use the CLI, below):
 
-- `ivrit-ai/whisper-large-v3-ggml` — Hebrew (~3.0 GB). Empirically more
-  accurate on Hebrew speech than the smaller `large-v3-turbo` finetune,
-  which is why we ship the larger one despite the size and ~2× inference
-  cost.
 - `openai whisper-large-v3-turbo` (the `ggerganov/whisper.cpp` build) —
-  English / multilingual (~1.6 GB).
+  Swedish, English and every other Whisper language (~1.6 GB). This is the
+  model Mila uses.
+- `ivrit-ai/whisper-large-v3-ggml` — a Hebrew finetune (~3.0 GB), kept in the
+  catalog for anyone still transcribing Hebrew. Mila no longer offers Hebrew as
+  a recording language, so this model is optional and ~2× slower.
 
-You can monitor progress in the in-app banner or pre-download from the CLI:
+Download progress shows in the Models pane. To pre-download from the CLI:
 
 ```bash
 make models
@@ -137,14 +139,15 @@ The app picks them up from that directory automatically.
 
 By default Mila transcribes entirely on-device — audio never leaves your Mac.
 If you'd rather offload transcription (e.g. on a low-powered Mac, or to use a
-Hebrew-tuned model that's too large to run locally), **Settings → Models** lets
+model that's too large to run locally), **Settings → Models** lets
 you switch the backend to any OpenAI-compatible `/v1/audio/transcriptions`
 endpoint: OpenAI's own Whisper API, or a self-hosted server. The API key is
 stored in your Keychain, and the UI flags that audio leaves the device while
 this backend is active.
 
 To run [ivrit.ai](https://www.ivrit.ai/)'s Hebrew models (or any other Whisper
-model) behind this API on your own machine, see
+model — for Swedish, any multilingual Whisper build such as
+`deepdml/faster-whisper-large-v3-turbo-ct2`) behind this API on your own machine, see
 **[docs/REMOTE_TRANSCRIPTION_SERVER.md](docs/REMOTE_TRANSCRIPTION_SERVER.md)**.
 
 To deploy a **shared team server** on Kubernetes (one GPU, many users — Mila

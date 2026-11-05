@@ -304,19 +304,18 @@ final class LLMSettings: ObservableObject {
         }
     }
 
-    /// Master switch for the AUTOMATIC post-recording summary
-    /// (`RecordingSummarizer`). When off, no summary is generated when a
-    /// recording finishes, on launch backfill, or on re-transcription —
-    /// the app behaves as a transcript-only tool. The explicit
-    /// "Regenerate summary" affordance still works on demand; this only
-    /// governs the automatic path.
-    ///
-    /// Defaults to ON (see init) so existing users keep their summaries
-    /// unless they opt out. Surfaced in the "Automatic summary" section of
-    /// Settings → AI Features, alongside the summary prompt it governs.
-    @Published var summaryEnabled: Bool {
-        didSet { defaults.set(summaryEnabled, forKey: Keys.summaryEnabled) }
-    }
+    // There is no automatic post-recording summary any more (issue #3934), so there
+    // is no `summaryEnabled` master switch. Mila used to summarize every recording the
+    // moment its transcript landed, and — because speaker identification finished a few
+    // seconds later — summarize it AGAIN with the names in it: two provider calls per
+    // meeting, the first one's output thrown away. Summaries are now made by an explicit
+    // action: "Summarize" (detail-view header / right-click menu), or "Regenerate
+    // summary" on a row that already has one. The one automatic exception is Live AI,
+    // which finishes the rolling summary it already paid for when the recording stops.
+    //
+    // The UserDefaults key `llm.summary.enabled` stays in `Keys` below, unread: a user
+    // who switched it OFF keeps that choice recorded, and no future build can
+    // re-introduce automatic sending by re-using the name.
 
     /// Whether Mila asks the LLM, after a recording finishes, which unnamed
     /// speakers state their own name in the transcript ("Hi, I'm Dana") and
@@ -324,17 +323,15 @@ final class LLMSettings: ObservableObject {
     /// issue #348). Only ever SUGGESTS — nothing is renamed, and nothing
     /// reaches a voice profile, until the user accepts.
     ///
-    /// **Default: whatever `summaryEnabled` is.** The call sends the same
-    /// transcript to the same provider the automatic summary already does, so
-    /// a user who lets Mila send transcripts automatically gets it, and a user
-    /// who switched automatic sending off (auto-summary off) does not start
-    /// sending them because of an upgrade. Nothing is sent at all unless the
-    /// provider is configured (`isSpeakerNameSuggestionReady`). Until the user
-    /// touches this switch it reads the CURRENT auto-summary value — live, in
-    /// this session and after a relaunch alike; the first explicit flip is
-    /// persisted and wins from then on.
+    /// **Default: ON.** It used to follow the automatic-summary switch, which no
+    /// longer exists. The call is one short exchange over a transcript Mila already
+    /// sends for the other AI features, and its entire output is a banner the user
+    /// accepts or ignores — so keeping what users had before #3934 (on for anyone with
+    /// a provider configured) is the least surprising reading. Nothing is sent at all
+    /// unless a provider is configured (`isSpeakerNameSuggestionReady`), and the switch
+    /// is in Settings → AI features for anyone who wants it off.
     var speakerNameSuggestionsEnabled: Bool {
-        get { speakerNameSuggestionsChoice ?? summaryEnabled }
+        get { speakerNameSuggestionsChoice ?? true }
         set {
             speakerNameSuggestionsChoice = newValue
             defaults.set(newValue, forKey: Keys.speakerNameSuggestionsEnabled)
@@ -342,10 +339,8 @@ final class LLMSettings: ObservableObject {
     }
 
     /// The user's explicit choice for `speakerNameSuggestionsEnabled`, or nil
-    /// while they have never touched the switch — in which case the effective
-    /// value is the CURRENT `summaryEnabled`, live, not a copy taken at
-    /// launch. `@Published` so a flip re-renders the switch; `summaryEnabled`
-    /// already publishes for the follow-along case.
+    /// while they have never touched the switch — in which case the default above
+    /// applies. `@Published` so a flip re-renders the switch.
     @Published private var speakerNameSuggestionsChoice: Bool?
 
     /// "Enabled AND ready" for speaker-name suggestions, per
@@ -615,15 +610,11 @@ final class LLMSettings: ObservableObject {
         self.namePrompt = defaults.string(forKey: Keys.namePrompt) ?? Self.defaultNamePrompt
         self.postActionEnabled = defaults.bool(forKey: Keys.actionEnabled)
         self.postActionPrompt = defaults.string(forKey: Keys.actionPrompt) ?? Self.defaultActionPrompt
-        // Default-OFF, so a plain `bool` read is the right one here (unlike
-        // `summaryEnabled` below): "key absent" and "user said no" mean the
-        // same thing, and inlining must stay the behaviour nobody opted into.
+        // Default-OFF, so a plain `bool` read is the right one here: "key absent"
+        // and "user said no" mean the same thing, and inlining must stay the
+        // behaviour nobody opted into.
         self.actionTranscriptByPath = defaults.bool(forKey: Keys.actionTranscriptByPath)
-        // Default-on: a bare `defaults.bool` would read false for users who
-        // have never seen this key, silently disabling summaries for
-        // everyone on upgrade. Treat "key absent" as true.
-        self.summaryEnabled = (defaults.object(forKey: Keys.summaryEnabled) as? Bool) ?? true
-        // Absent → nil → the switch follows auto-summary, live (see
+        // Absent → nil → the switch's own default (see
         // `speakerNameSuggestionsEnabled`).
         self.speakerNameSuggestionsChoice =
             defaults.object(forKey: Keys.speakerNameSuggestionsEnabled) as? Bool
@@ -689,6 +680,9 @@ final class LLMSettings: ObservableObject {
         static let actionEnabled = "llm.action.enabled"
         static let actionPrompt = "llm.action.prompt"
         static let actionTranscriptByPath = "llm.action.transcriptByPath"
+        /// Unread since #3934 removed the automatic-summary switch. Kept so a
+        /// user's old "off" choice is not silently reclaimed, and so the name
+        /// cannot be recycled by a future feature into a different meaning.
         static let summaryEnabled = "llm.summary.enabled"
         static let speakerNameSuggestionsEnabled = "llm.speakerNames.enabled"
         static let cliTimeout = "llm.cli.timeout"

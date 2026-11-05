@@ -28,15 +28,15 @@ private let suggesterLog = Logger(subsystem: "io.island.whisper.IslandWhisper",
 /// into a voice profile and then spread to every future recording of that
 /// voice; a wrong suggestion costs one click.
 ///
-/// **When it runs.** Once per fresh completion, AFTER the recording's summary
-/// attempt has settled: the completion paths (`TranscriptionService`'s
-/// `onTranscriptionCompleted` hook, `QuickActionsController.finalizeTail`)
-/// call `markPending`, and `RecordingSummarizer.onSummaryFinished` calls
-/// `suggestIfPending`. Sequencing it behind the summary keeps one recording
-/// to one provider call at a time, and by then the speaker labels are final
-/// (the offline re-diarization finishes before the summary is kicked). The
-/// launch-time summary backfill never marks anything, so it does not turn
-/// into a name-inference sweep of the back catalogue.
+/// **When it runs.** Once per fresh completion, from the completion paths
+/// themselves — `TranscriptionService.onTranscriptionCompleted` and
+/// `QuickActionsController.finalizeTail` — and AFTER the post-pass speaker work
+/// has settled the labels: the offline re-diarization re-keys speaker ids, and a
+/// suggestion is keyed by speaker id, so it must not run before that. It used to
+/// be deferred behind the recording's automatic-summary attempt (a sequencing
+/// whose only real purpose was to keep one recording to one provider call at a
+/// time); #3934 removed the automatic summary, so there is nothing left to wait
+/// for and both paths call `suggest(recordingID:)` directly.
 ///
 /// **Why a separate call rather than a section of the summary prompt.** The
 /// summary is built from `Recording.fullText`, which carries no speaker
@@ -73,8 +73,6 @@ final class SpeakerNameSuggester {
     private let identity: SpeakerIdentitySettings
     private let runLLM: RunLLM
 
-    /// Fresh completions waiting for their summary attempt to settle.
-    private var pending: Set<UUID> = []
     /// Recordings waiting for an LLM slot.
     private var queue: [UUID] = []
     private var inFlight: [UUID: (token: UUID, task: Task<Void, Never>)] = [:]
@@ -129,37 +127,9 @@ final class SpeakerNameSuggester {
                 for id in ids { self.cancel(recordingID: id) }
             }
             .store(in: &cancellables)
-        // A mark only means something until that recording's summary attempt
-        // settles, and the summarizer does not signal for a row that was
-        // trashed or deleted meanwhile. Drop such marks the moment the row
-        // leaves the live list, so a later manual "Regenerate summary" (after
-        // a restore, say) cannot consume a stale mark and trigger a call that
-        // no fresh completion asked for.
-        store.$recordings
-            .sink { [weak self] recordings in
-                guard let self, !self.pending.isEmpty else { return }
-                let live = Set(recordings.lazy.filter { !$0.isTrashed }.map(\.id))
-                self.pending.formIntersection(live)
-            }
-            .store(in: &cancellables)
     }
 
     // MARK: - Triggers
-
-    /// A recording just completed a transcription pass (or the live path's
-    /// finalization). Its suggestions run once its summary attempt settles —
-    /// see `suggestIfPending`.
-    func markPending(_ recordingID: UUID) {
-        pending.insert(recordingID)
-    }
-
-    /// The summary attempt for `recording` has settled (generated, skipped or
-    /// failed). Runs the suggester if, and only if, this recording was
-    /// marked by a fresh completion.
-    func suggestIfPending(_ recording: Recording) {
-        guard pending.remove(recording.id) != nil else { return }
-        suggest(recordingID: recording.id)
-    }
 
     /// Produce suggestions for `recordingID` now: the local-user one
     /// synchronously, the transcript ones via a queued LLM call.
@@ -187,11 +157,10 @@ final class SpeakerNameSuggester {
         pump()
     }
 
-    /// Drop all work for `recordingID`: pending mark, queue entry, and the
-    /// in-flight call (task cancellation is what `LLMRunner` turns into
-    /// SIGTERM/SIGKILL for a CLI child).
+    /// Drop all work for `recordingID`: queue entry, and the in-flight call
+    /// (task cancellation is what `LLMRunner` turns into SIGTERM/SIGKILL for a
+    /// CLI child).
     func cancel(recordingID: UUID) {
-        pending.remove(recordingID)
         rerunRequested.remove(recordingID)
         queue.removeAll { $0 == recordingID }
         if let run = inFlight.removeValue(forKey: recordingID) {
@@ -572,11 +541,16 @@ final class SpeakerNameSuggester {
     /// Words that may come right before "<name> here" / "<name> speaking" in
     /// a genuine introduction ("Hi, Dana here", "this is Dana speaking"). Any
     /// other word makes it part of a longer sentence: "I left Dana here".
+    ///
+    /// Swedish entries are written the way `normalizedForMatching` folds them
+    /// (å/ä → a, ö → o, case stripped), because the set is compared against
+    /// normalized text: "Hej, Dana" arrives here as "hej dana".
     static let introductionLeadIns: Set<String> = [
         "hi", "hey", "hello", "ok", "okay", "so", "well", "yes", "yeah", "and",
         "is", "s", "morning", "afternoon", "evening", "all", "everyone", "everybody",
         "folks", "guys", "team",
-        "היי", "הי", "שלום", "כן", "אז", "טוב", "זה", "זו", "בוקר", "ערב", "לכולם",
+        "hej", "halla", "god", "morgon", "eftermiddag", "kvall", "ja", "da",
+        "och", "alla", "allihopa", "teamet",
     ]
 
     /// Whether `words` (normalized, the turn's own context around the
@@ -628,9 +602,14 @@ final class SpeakerNameSuggester {
     /// "this is Dana speaking" is caught by the suffix list instead.
     static let selfIntroductionPrefixes = [
         "my name is", "my name s", "i m", "im", "i am", "call me",
-        "שמי", "קוראים לי", "השם שלי", "אני",
+        // Swedish (folded): "jag heter Dana", "mitt namn är Dana", "namnet är
+        // Dana". "hon heter" is deliberately absent — that is someone else.
+        "jag heter", "mitt namn ar", "namnet ar", "namnet mitt ar", "kallar mig",
     ]
-    static let selfIntroductionSuffixes = ["here", "speaking", "מדבר", "מדברת"]
+    /// The single word that turns "<name> …" into a self-introduction.
+    /// "heter" covers the Swedish order ("Dana heter jag"). The folded form of
+    /// "här" ("har") is deliberately NOT here: "Dana har bokat" is a verb.
+    static let selfIntroductionSuffixes = ["here", "speaking", "heter"]
 
     /// Whether the (normalized) quote is someone stating `name` as their own.
     static func isSelfIntroduction(normalizedQuote: String, name: String) -> Bool {

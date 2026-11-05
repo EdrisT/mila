@@ -560,14 +560,17 @@ final class ObsidianExporterTests: XCTestCase {
         }
     }
 
-    // MARK: - Pending gate
-
-    func test_pending_gate() {
-        let id = UUID()
-        XCTAssertFalse(exporter.isPending(id))
-        exporter.markPending(id)
-        XCTAssertTrue(exporter.isPending(id))
-        exporter.clearPending(id)
-        XCTAssertFalse(exporter.isPending(id))
+    /// The gate that keeps a discarded recording out of the vault. It used to be
+    /// two-state (a `pending` mark plus the tombstone); with the note written
+    /// straight from the completion hook there is only the tombstone, and it has
+    /// to hold against BOTH hooks that can reach `export`.
+    func test_a_discarded_recording_is_never_exported_again() throws {
+        let rec = makeRecording(title: "Gone", fullText: "the transcript body")
+        XCTAssertNotNil(exporter.export(rec), "the note lands while the recording exists")
+        XCTAssertNotNil(exporter.discardNote(for: rec))
+        // A late completion — `finalizeTail` still running, or a Regenerate
+        // finishing after the row was deleted — must not re-file it.
+        XCTAssertNil(exporter.export(rec))
+        XCTAssertNil(exporter.export(rec), "and stays out on a second attempt")
     }
 }

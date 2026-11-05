@@ -1230,6 +1230,7 @@ final class TranscriptionServiceTests: XCTestCase {
         XCTAssertEqual(normalized.map(\.speaker),
                        ["SPEAKER_00", "SPEAKER_01", "SPEAKER_00"])
         XCTAssertEqual(normalized[0].speaker?.friendlySpeakerLabel(language: "en"), "Speaker A")
+        XCTAssertEqual(normalized[1].speaker?.friendlySpeakerLabel(language: "sv"), "Talare B")
     }
 }
 

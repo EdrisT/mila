@@ -90,24 +90,27 @@ struct HotkeyBinding: Codable, Equatable, Hashable {
 }
 
 /// Logical IDs for our two dictation hotkeys. Used as both the Carbon
-/// `EventHotKeyID.id` and the storage key in `UserDefaults`.
+/// `EventHotKeyID.id` and the storage key in `UserDefaults` — so renaming a
+/// case changes the persisted key. `HotkeySettings.init` migrates the one
+/// rename we've done (`dictateHebrew` → `dictateSwedish`) instead of silently
+/// dropping the user's custom binding.
 enum HotkeyAction: String, CaseIterable, Hashable, Identifiable {
     case dictateEnglish
-    case dictateHebrew
+    case dictateSwedish
 
     var id: String { rawValue }
 
     var languageCode: String {
         switch self {
         case .dictateEnglish: return "en"
-        case .dictateHebrew:  return "he"
+        case .dictateSwedish: return "sv"
         }
     }
 
     var displayLabel: String {
         switch self {
         case .dictateEnglish: return "English dictation"
-        case .dictateHebrew:  return "Hebrew dictation"
+        case .dictateSwedish: return "Swedish dictation"
         }
     }
 
@@ -115,7 +118,7 @@ enum HotkeyAction: String, CaseIterable, Hashable, Identifiable {
     var carbonID: UInt32 {
         switch self {
         case .dictateEnglish: return 1
-        case .dictateHebrew:  return 2
+        case .dictateSwedish:  return 2
         }
     }
 
@@ -127,7 +130,7 @@ enum HotkeyAction: String, CaseIterable, Hashable, Identifiable {
     static let defaults: [HotkeyAction: HotkeyBinding] = [
         .dictateEnglish: HotkeyBinding(keyCode: UInt32(kVK_ANSI_2),
                                        modifiers: UInt32(cmdKey)),
-        .dictateHebrew:  HotkeyBinding(keyCode: UInt32(kVK_ANSI_3),
+        .dictateSwedish: HotkeyBinding(keyCode: UInt32(kVK_ANSI_3),
                                        modifiers: UInt32(cmdKey))
     ]
 }

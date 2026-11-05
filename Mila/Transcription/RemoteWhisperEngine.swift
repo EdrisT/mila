@@ -489,7 +489,7 @@ actor RemoteWhisperEngine: RemoteTranscribing {
                 // A `diarized_json` body labels turns "A", "B", … — a
                 // different label space from the one the rest of the app
                 // speaks (`SPEAKER_00`, which is what `friendlySpeakerLabel`
-                // renders as "Speaker A" / "דובר א׳", what `speakerNames` is
+                // renders as "Speaker A" / "Talare A", what `speakerNames` is
                 // keyed by, and what the exporters emit). Re-key at the
                 // boundary where the foreign labels enter, so server-side
                 // diarization is indistinguishable downstream from the local

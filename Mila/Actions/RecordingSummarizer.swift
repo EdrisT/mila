@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import OSLog
+import MilaKit
 
 private let summarizerLog = Logger(subsystem: "io.island.whisper.IslandWhisper",
                                    category: "RecordingSummarizer")
@@ -8,17 +9,23 @@ private let summarizerLog = Logger(subsystem: "io.island.whisper.IslandWhisper",
 /// Fires a one-shot LLM call against a finished recording's transcript and
 /// stores the result on the `Recording.summary` field.
 ///
-/// Three entry points:
-///   * `summarizeIfNeeded(_:)` — fired by the post-transcription hook for
-///     every freshly-transcribed recording. Skips work when a live summary
-///     is already there.
-///   * `regenerate(_:)` — explicit user action (Re-transcribe completion +
-///     "Regenerate summary" context menu). Bypasses the
+/// Two entry points, both explicit user actions (issue #3934):
+///   * `summarizeIfNeeded(_:)` — "Summarize" in the detail-view header and in
+///     the recording's right-click menu. Skips work when a summary is already
+///     there, so the button can be pressed twice without billing twice.
+///   * `regenerate(_:)` — "Regenerate summary" on a row that already has one
+///     (including a stale-flagged one after a re-transcription). Bypasses the
 ///     "already has summary" gate so the old summary is replaced.
-///   * `backfillIfNeeded()` — called on launch and on LLM-config flip
-///     (off→on). Scans the store for completed recordings missing a
-///     summary and queues them through `summarizeIfNeeded` with a
-///     concurrency cap so we don't melt the user's API quota.
+///
+/// There is deliberately NO automatic path here any more. There were three: a
+/// launch sweep, a sweep whenever the LLM got configured, and one call per
+/// finished recording — that last one fired TWICE per meeting, once when the
+/// transcript landed and again seconds later when speaker identification did,
+/// so a meeting cost two provider calls and the first output was thrown away.
+/// Nothing in this type may spawn a call on its own. The single automatic
+/// exception lives in `QuickActionsController.stopRecording`, which regenerates
+/// once for a Live AI recording to finish the rolling summary that feature had
+/// already been paying for during the meeting.
 ///
 /// Uses the same `LLMRunner` + sandboxing the rename sheet's "Send to
 /// Claude" path uses, so any `$PATH` / TCC-popup mitigations carry over
@@ -66,8 +73,8 @@ final class RecordingSummarizer: ObservableObject {
     /// two overlapping CLI invocations.
     ///
     /// Published as a set so detail views can show a "Summarizing…"
-    /// spinner on the summary section while a call is in flight (used by
-    /// the "Regenerate summary" affordance + backfill).
+    /// spinner on the summary section while a call is in flight — used by both
+    /// the "Summarize" button and "Regenerate summary".
     @Published private(set) var inFlightIDs: Set<UUID> = []
     private var inFlight: [UUID: InFlightRun] = [:]
 
@@ -125,7 +132,17 @@ final class RecordingSummarizer: ObservableObject {
         let extraArgs: [String]
         let promptLanguageName: String
         let prompt: String
+        /// The transcript rendered for the model (speaker labels included).
+        /// Always the snapshot, whatever `transcriptInline` says — the
+        /// staleness check in `completion(of:token:produced:)` compares it
+        /// against the live row, so it has to describe what the run was built
+        /// from even when the prompt carried the text itself.
         let transcript: String
+        /// Whether the transcript goes to `LLMRunner` as its own appended
+        /// block. `false` when the user's prompt placed `{{TRANSCRIPT}}`
+        /// somewhere in its own text — the prompt already holds it, and
+        /// appending a second copy would pay for the transcript twice.
+        let transcriptInline: Bool
         let openAIBaseURL: String
     }
 
@@ -169,31 +186,18 @@ final class RecordingSummarizer: ObservableObject {
     /// nothing downstream of the call site depends on it.
     var onSummaryFinished: ((Recording) -> Void)?
 
-    /// Recordings the backfill scan has identified as needing a summary
-    /// but hasn't started yet — held here so `maxConcurrent` is enforced
-    /// across the whole batch instead of letting all candidates spawn at
-    /// once.
-    private var backfillQueue: [UUID] = []
-
     /// Runs `cancel(recordingID:)` has removed from `inFlight` whose tasks
     /// have not unwound yet, keyed by run token. Their child is still being
-    /// killed (SIGTERM, grace, SIGKILL, bounded reap), so `pumpBackfill`
-    /// counts them against `maxConcurrent`: otherwise another run's
-    /// completion could start new CLIs while the cancelled one is still
-    /// alive. Inserted by `cancel`, removed by token in the cancelled task's
-    /// own `defer`. Also what `awaitInFlight` waits on for a cancelled id.
+    /// killed (SIGTERM, grace, SIGKILL, bounded reap), so the entry is kept
+    /// until the task has actually unwound and `awaitInFlight` waits on it:
+    /// a test asserting "a permanent delete stored nothing" must not pass
+    /// vacuously while the cancelled call is still alive.
     private var cancelledRuns: [UUID: (recordingID: UUID, task: Task<Void, Never>)] = [:]
 
-    /// Max concurrent in-flight CLI invocations the summarizer will
-    /// schedule from backfill / regeneration. Starts at 2 — high enough
-    /// that two recordings get summarized at app launch in parallel but
-    /// low enough that a 20-recording catch-up sweep doesn't fork 20
-    /// `claude -p` subprocesses on the user's machine.
-    var maxConcurrent: Int = 2
-
-    /// Subscribers held for the lifetime of the summarizer. We watch
-    /// `LLMSettings.$tool` so a user who configures their CLI mid-session
-    /// gets an automatic backfill sweep the moment the toggle flips.
+    /// Subscribers held for the lifetime of the summarizer. Only the store's
+    /// permanent-delete signal today — the `LLMSettings.$tool` observer existed
+    /// to re-run the launch/backfill sweep when the user configured a provider,
+    /// and that sweep is gone (#3934).
     private var cancellables: Set<AnyCancellable> = []
 
     /// Timeout for the one-shot summary call. Reads from `LLMSettings.cliTimeout`
@@ -230,37 +234,6 @@ final class RecordingSummarizer: ObservableObject {
         self.liveAISettings = liveAISettings
         self.runLLM = runLLM
 
-        // Backfill on off→on transitions of LLM configured-ness. The
-        // `tool` property is the only one that affects `isConfigured`
-        // today; observing it directly (rather than the computed
-        // `isConfigured`) means we don't need to expose a publisher on
-        // the computed property.
-        //
-        // `@Published` emits from `willSet` — i.e. the sink fires
-        // BEFORE the property has been updated, so `llmSettings.tool`
-        // and `llmSettings.isConfigured` still report the OLD value at
-        // sink time. `Task { @MainActor }` from a main-actor caller
-        // can resume on the same actor tick (Swift's scheduler does not
-        // guarantee a real runloop hop), so reading `isConfigured`
-        // inside the Task body still saw the old value in CI.
-        //
-        // `.receive(on: DispatchQueue.main)` shifts delivery onto the
-        // next main-queue tick via `dispatch_async`, which is a hard
-        // boundary: by the time the sink runs, the @Published setter
-        // has fully completed (storage written, didSet invoked) so
-        // `isConfigured` reflects the new value.
-        llmSettings.$tool
-            .map { $0 != .none }
-            .removeDuplicates()
-            .dropFirst()  // ignore the initial value emitted by @Published
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] nowConfigured in
-                guard let self, nowConfigured else { return }
-                summarizerLog.log("llm configured flipped on — scheduling backfill")
-                self.backfillIfNeeded()
-            }
-            .store(in: &cancellables)
-
         // Permanent delete (single row, or emptying Recently Deleted) cancels
         // that row's summary call. Wired here rather than at each delete call
         // site so no path can forget it: every permanent removal goes through
@@ -278,11 +251,15 @@ final class RecordingSummarizer: ObservableObject {
     // MARK: - Predicates
 
     /// Returns true iff `recording` needs (and can get) a one-shot summary
-    /// under the normal (non-force) gate.
+    /// under the normal (non-force) gate: a provider is configured, the
+    /// transcript is not empty, and no summary exists yet. There is no
+    /// `summaryEnabled` master switch any more (#3934) — nothing runs by
+    /// itself, so "did the user want this?" is answered by the button they
+    /// pressed and this gate only asks "can it succeed, and would it overwrite
+    /// something?".
     /// Public so callers + tests can ask the same question we ask
     /// internally without re-deriving the predicate.
     func shouldSummarize(_ recording: Recording) -> Bool {
-        guard llmSettings.summaryEnabled else { return false }
         guard llmSettings.isConfigured else { return false }
         let transcript = recording.fullText
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -419,76 +396,22 @@ final class RecordingSummarizer: ObservableObject {
         regenerate(updated)
     }
 
-    /// Scan the store for completed recordings missing a summary, then
-    /// process them newest-first with at most `maxConcurrent` in-flight
-    /// CLI invocations. No-op when the LLM CLI isn't configured (the
-    /// constructor's `$tool` subscriber re-runs the scan once that
-    /// changes).
-    ///
-    /// Idempotent: re-runs are safe — recordings already in flight are
-    /// skipped by `runSummary`'s own dedup check.
-    func backfillIfNeeded() {
-        guard llmSettings.summaryEnabled else {
-            summarizerLog.log("backfill: skipped — auto-summary disabled")
-            return
-        }
-        guard llmSettings.isConfigured else {
-            summarizerLog.log("backfill: skipped — LLM not configured")
-            return
-        }
-        // Newest-first: scan in the same order RecordingStore keeps its
-        // array (createdAt descending) so the recording the user just
-        // made gets attention before the months-old archive.
-        let candidates: [Recording] = store.recordings.filter { rec in
-            guard rec.status == .completed else { return false }
-            guard !rec.isTrashed else { return false }
-            let transcript = rec.fullText
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !transcript.isEmpty else { return false }
-            let existing = (rec.summary ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            return existing.isEmpty
-        }
-        guard !candidates.isEmpty else {
-            summarizerLog.log("backfill: nothing to do")
-            return
-        }
-        summarizerLog.log("backfill: \(candidates.count, privacy: .public) candidate(s) queued (concurrency=\(self.maxConcurrent, privacy: .public))")
-        // Append rather than replace so a config-flip-triggered re-scan
-        // that runs while a previous backfill is still draining doesn't
-        // drop in-progress IDs. The dedup guard inside `runSummary`
-        // covers duplicate enqueues.
-        for rec in candidates {
-            if !backfillQueue.contains(rec.id),
-               !inFlight.keys.contains(rec.id) {
-                backfillQueue.append(rec.id)
-            }
-        }
-        pumpBackfill()
-    }
-
-    /// Cancel any summary work for `recordingID`: drop it from the backfill
-    /// queue and cancel its in-flight call. Called for every permanent
-    /// delete via `RecordingStore.permanentlyDeleted` (see `init`), so a
-    /// deleted recording does not spend a CLI call on output that has
+    /// Cancel any summary call in flight for `recordingID`. Called for every
+    /// permanent delete via `RecordingStore.permanentlyDeleted` (see `init`), so
+    /// a deleted recording does not spend a provider call on output that has
     /// nowhere to go.
     ///
-    /// Cancelling the task is what stops the child: `LLMRunner.run` bridges
-    /// task cancellation to SIGTERM, escalating to SIGKILL after a short
-    /// grace, with every wait bounded. The slot is handed on once that child
-    /// is gone, not before: the cancelled task's `defer` runs
-    /// `pumpBackfill()` when the call unwinds, so the next queued recording
-    /// starts then, and `maxConcurrent` keeps counting processes that are
-    /// really running rather than ones still being killed.
+    /// Cancelling the task is what stops the child: `LLMRunner.run` bridges task
+    /// cancellation to SIGTERM, escalating to SIGKILL after a short grace, with
+    /// every wait bounded. The run is parked in `cancelledRuns` until its task
+    /// unwinds, so `awaitInFlight` keeps waiting through the kill instead of
+    /// reporting "nothing was stored" while the call is still alive.
     ///
     /// NOT called when a recording is moved to Recently Deleted. That is
-    /// reversible, and nothing re-queues a restored recording's summary
-    /// until the next launch's backfill, so cancelling (or dropping it from
-    /// the queue) would leave a restored row without one; letting the call
-    /// happen costs only the call the recording was already owed. Emptying
-    /// the bin cancels whatever is still running or queued.
+    /// reversible, and a call now costs nothing the user did not already pay
+    /// for — every summary is one they asked for. Emptying the bin cancels
+    /// whatever is still running.
     func cancel(recordingID: UUID) {
-        backfillQueue.removeAll { $0 == recordingID }
         if let run = inFlight.removeValue(forKey: recordingID) {
             run.task.cancel()
             inFlightIDs.remove(recordingID)
@@ -499,23 +422,6 @@ final class RecordingSummarizer: ObservableObject {
     }
 
     // MARK: - Internals
-
-    /// Drain `backfillQueue` up to the concurrency cap. Re-invoked from
-    /// each task's `defer` so as soon as one finishes the next one can
-    /// start.
-    private func pumpBackfill() {
-        while inFlight.count + cancelledRuns.count < maxConcurrent, !backfillQueue.isEmpty {
-            let id = backfillQueue.removeFirst()
-            guard let rec = store.recordings.first(where: { $0.id == id }) else {
-                continue
-            }
-            // Re-check the gate — the recording may have been trashed,
-            // re-transcribed, or summarized via another code path
-            // between scan time and now.
-            guard shouldSummarize(rec) else { continue }
-            runSummary(for: rec, force: false)
-        }
-    }
 
     /// Common path used by `summarizeIfNeeded` and `regenerate`.
     /// `force` controls whether an already-present summary is overwritten
@@ -600,13 +506,10 @@ final class RecordingSummarizer: ObservableObject {
                         self.inFlight[id] = nil
                         self.inFlightIDs.remove(id)
                         // Started HERE, synchronously, once `inFlight` is
-                        // clear and BEFORE the backfill pump: the follow-up
-                        // takes the slot this run just freed instead of
-                        // starting on top of a backfill candidate that took
-                        // it, so `maxConcurrent` holds. Re-read now, so it
+                        // clear, so the follow-up re-takes the id under the
+                        // dedup guard rather than racing it. Re-read now, so it
                         // summarizes the row as of completion. Non-force
-                        // follow-ups go back through the normal gate
-                        // (auto-summary may have been switched off). A row
+                        // follow-ups go back through the normal gate. A row
                         // that is gone, or in Recently Deleted, gets no LLM
                         // call and no signal — the same as a row trashed
                         // mid-pass gets no completion work from
@@ -624,9 +527,6 @@ final class RecordingSummarizer: ObservableObject {
                     // `cancelledRuns` until now. (A no-op for a run that
                     // was never cancelled.)
                     self.cancelledRuns[token] = nil
-                    // After each completion, try to pull the next
-                    // queued backfill candidate in.
-                    self.pumpBackfill()
                 }
             }
             do {
@@ -636,7 +536,7 @@ final class RecordingSummarizer: ObservableObject {
                 let raw = try await runLLM(
                     inputs.tool,
                     inputs.prompt,
-                    inputs.transcript,
+                    inputs.transcriptInline ? inputs.transcript : "",
                     inputs.executableOverride,
                     inputs.model.isEmpty ? nil : inputs.model,
                     inputs.extraArgs,
@@ -647,12 +547,14 @@ final class RecordingSummarizer: ObservableObject {
                     nil
                 )
                 // Split the CLI output into the plain-text summary and the
-                // action-items list. `parseSummaryAndItems` handles the
-                // sentinel format the prompt asks for, tolerates a model
-                // that returned a JSON envelope instead, and — crucially —
-                // never surfaces a raw `{...}` blob as the summary when the
-                // model emits malformed JSON (unescaped quotes / newlines in
-                // a long summary value, which broke the object decode).
+                // action-items list. With no marker requested, a normal run
+                // lands in the `.plain` branch: the whole response is the
+                // summary. `parseSummaryAndItems` still tolerates a marker the
+                // user asked for, a model that returned a JSON envelope on its
+                // own, and — crucially — never surfaces a raw `{...}` blob as
+                // the summary when the model emits malformed JSON (unescaped
+                // quotes / newlines in a long summary value, which broke the
+                // object decode).
                 let (summaryText, parsedItems, origin) = Self.parseSummaryAndItems(from: raw)
                 guard !summaryText.isEmpty else {
                     // `origin` distinguishes "the CLI printed nothing" from
@@ -707,6 +609,13 @@ final class RecordingSummarizer: ObservableObject {
                     return
                 }
                 current.summary = summaryText
+                // A summary written from the transcript on the row right now is
+                // current by definition, so the staleness flag a completed
+                // re-transcription left behind goes with it — cleared in the
+                // SAME `store.update` below, never in a second write, so no
+                // window exists where a fresh overview and an "out of date"
+                // badge sit on one row.
+                current.summaryStaleAt = nil
                 // Replace the recording's action items with the fresh
                 // full-transcript set whenever the model returned any — but
                 // never at the cost of an item the user DICTATED out loud.
@@ -777,35 +686,42 @@ final class RecordingSummarizer: ObservableObject {
         let model = LLMSettings.backgroundModelName(tool: tool,
                                                     openAIModelName: llmSettings.openAIModelName,
                                                     liveAIModel: liveAISettings.model)
-        // Per-recording override first, then the global setting (with Auto
-        // resolved against the transcript text). Resolved ONCE per run; a
-        // pick while the call is out is caught by the completion.
+        // Per-recording override first, then the global setting (Auto passes
+        // "the same language as the transcript" through to the model). Resolved
+        // ONCE per run; a pick while the call is out is caught by the completion.
         let promptLanguageName = Self.promptLanguageName(for: recording,
                                                          global: liveAISettings.outputLanguage)
-        let basePrompt = liveAISettings.summaryPrompt
-            .replacingOccurrences(of: "{{LANGUAGE}}", with: promptLanguageName)
-        // Wrap the user's plain-text summary prompt so the one-shot call
-        // also returns action items. Restores the summary + action-items
-        // pair the pre-#87 inline final Live-AI tick used to produce. See
-        // `promptWithActionItems`: the summary stays PLAIN TEXT and only a
-        // compact item array is JSON, so a long multi-line Hebrew summary
-        // full of quotes can't corrupt the parse.
-        let prompt = Self.promptWithActionItems(base: basePrompt, language: promptLanguageName)
-        // Event notes last, so they sit directly above the `---` + transcript
-        // half `LLMRunner.composedPrompt` appends: context first, then the
-        // words actually spoken. Only present when the user opted into the
-        // body at sync time — `summaryNotes` is nil otherwise, and a
-        // `regenerate` months later therefore cannot widen what an earlier
-        // sync agreed to send.
-        let promptWithContext = Self.promptWithCalendarNotes(prompt,
-                                                            link: recording.calendarLink)
+        // The transcript the model sees, rendered once: speaker-labelled turns
+        // when diarization ran, plain joined text when it did not. Used both
+        // as the `{{TRANSCRIPT}}` value and as the appended block, so the two
+        // can never disagree.
+        let transcript = Self.transcriptForLLM(for: recording)
+        // Everything the model is TOLD now comes from the editable prompt;
+        // Mila supplies only values. `promptWithActionItems`,
+        // `languageDirective` and `promptWithCalendarNotes` used to append
+        // English scaffolding a user could not edit, translate, or remove —
+        // the event notes and the meeting's own title are now the
+        // `{{CALENDAR_*}}` / `{{EVENT_TITLE}}` variables instead, so a user
+        // who wants them places them (in their own language) where they want
+        // them, and one who does not does not pay for them.
+        let template = liveAISettings.summaryPrompt
+        let prompt = PromptTemplate.render(
+            template,
+            values: Self.promptValues(for: recording,
+                                      languageName: promptLanguageName,
+                                      transcript: transcript))
+        // No slot in the prompt means the old envelope: `LLMRunner.composedPrompt`
+        // appends `---\nTranscript:` after it. A prompt that DOES place the
+        // transcript gets nothing appended.
+        let transcriptInline = !PromptTemplate.hasTranscriptSlot(template)
         return SummaryInputs(tool: tool,
                              executableOverride: executableOverride,
                              model: model,
                              extraArgs: llmSettings.extraArgsTokens,
                              promptLanguageName: promptLanguageName,
-                             prompt: promptWithContext,
-                             transcript: recording.fullText,
+                             prompt: prompt,
+                             transcript: transcript,
+                             transcriptInline: transcriptInline,
                              openAIBaseURL: llmSettings.openAIBaseURL)
     }
 
@@ -835,7 +751,7 @@ final class RecordingSummarizer: ObservableObject {
         guard let live = liveRecording(id) else { return .proceed(run) }
         let reason: String
         let liveLanguage = Self.promptLanguageName(for: live, global: run.globalLanguage)
-        if live.fullText != run.inputs.transcript || liveLanguage != run.inputs.promptLanguageName {
+        if Self.transcriptForLLM(for: live) != run.inputs.transcript || liveLanguage != run.inputs.promptLanguageName {
             reason = "transcript or summary language changed mid-flight"
         } else if run.regenerateWithNewInputs {
             reason = "regenerate with new inputs requested mid-flight"
@@ -849,14 +765,10 @@ final class RecordingSummarizer: ObservableObject {
     }
 
     /// Log why a `summarizeIfNeeded` call was rejected. Split out so the
-    /// reason ends up in OSLog (and Console.app) with the same
-    /// "skipped <id>: <reason>" shape backfill uses.
+    /// reason ends up in OSLog (and Console.app) in the same
+    /// "skipped <id>: <reason>" shape every other skip uses.
     private func logSkip(_ recording: Recording, force: Bool) {
         let id = recording.id
-        if !llmSettings.summaryEnabled {
-            summarizerLog.log("skipped \(self.shortID(id), privacy: .public): auto-summary disabled")
-            return
-        }
         if !llmSettings.isConfigured {
             summarizerLog.log("skipped \(self.shortID(id), privacy: .public): LLM not configured")
             return
@@ -879,110 +791,196 @@ final class RecordingSummarizer: ObservableObject {
         String(id.uuidString.prefix(8))
     }
 
-    /// Marker the one-shot prompt asks the model to place between the
-    /// plain-text summary and the JSON action-items array. Keeping the
-    /// summary OUTSIDE any JSON is deliberate: LLMs routinely emit long,
-    /// multi-line summaries with unescaped quotes/newlines, which makes an
-    /// enclosing JSON object un-decodable. Only the compact item array — far
-    /// less prone to stray quotes — needs to be valid JSON.
+    /// Marker that splits a summary from a JSON action-items array.
+    ///
+    /// Mila no longer ASKS for it. The request used to be hard-coded in
+    /// `promptWithActionItems` (now deleted): a paragraph of English the user
+    /// could not edit, translate or remove, appended to a prompt they had
+    /// written themselves. The PARSE stays, which keeps the feature available
+    /// on the user's own terms — write the contract into your prompt (in
+    /// whatever language you like):
+    ///
+    /// ```text
+    /// ###ACTION_ITEMS###
+    /// [{"id": "stable-slug", "text": "…", "source": "inferred"}]
+    /// ```
+    ///
+    /// and the items land in that recording's Action Items list. Without the
+    /// marker the whole response is the summary and Mila adds nothing.
+    ///
+    /// Keeping the summary OUTSIDE any JSON is still deliberate: LLMs routinely
+    /// emit long, multi-line summaries with unescaped quotes/newlines, which
+    /// makes an enclosing JSON object un-decodable. Only the compact item
+    /// array — far less prone to stray quotes — needs to be valid JSON.
     static let actionItemsSentinel = "###ACTION_ITEMS###"
 
     /// The language name the one-shot prompt is written for: the recording's
     /// own `summaryLanguageOverride` when the user set one, otherwise the
-    /// global `LiveAISettings.outputLanguage` — with `.auto` resolved against
-    /// the transcript text here rather than passed to the model as "match the
-    /// transcript", because Claude / cursor-agent obey a concrete "Output in
-    /// Hebrew" far more reliably than an introspective instruction (same
-    /// reasoning as `LiveAISession.kick`).
+    /// global `LiveAISettings.outputLanguage` — and `.auto` passes through as
+    /// "the same language as the transcript below" (`promptName`) instead of
+    /// being resolved to one concrete language here.
+    ///
+    /// `.auto` used to be resolved by counting Hebrew vs Latin letters in the
+    /// transcript, which worked only because Hebrew was the other language and
+    /// is a different script. Swedish vs English is not detectable that way, so
+    /// the model decides — the instruction is concrete about the transcript
+    /// being the reference, and a wrong guess by Mila would have been silent.
     ///
     /// Pure and static so a test can pin the resolution order without a
-    /// store or a runner. Returns the exact token substituted for
-    /// `{{LANGUAGE}}` and appended by `promptWithActionItems`.
+    /// store or a runner. Returns the exact string substituted into the
+    /// `{{LANGUAGE}}` slot of the user's prompt — Mila no longer states the
+    /// language anywhere else, so a prompt that drops the token decides the
+    /// language from its own wording (or from the transcript).
     static func promptLanguageName(for recording: Recording,
                                    global: LiveAISettings.OutputLanguage) -> String {
         if let override = recording.summaryLanguageOverride {
             return override.displayName
         }
-        switch global {
-        case .auto:
-            return recording.fullText.isPredominantlyHebrew ? "Hebrew" : "English"
-        case .english:
-            return "English"
-        case .hebrew:
-            return "Hebrew"
-        }
+        return global.promptName
     }
 
-    /// The one line that always carries the output language to the model.
-    /// `summaryPrompt`'s `{{LANGUAGE}}` slot is the user's to edit — and a
-    /// user who edited it out used to get a silent no-op from the Output
-    /// language setting (and would from the per-recording override too). So
-    /// the language is stated here as well, in the part of the request Mila
-    /// owns, and it names the action items explicitly because the base prompt
-    /// never mentions them.
-    static func languageDirective(_ language: String) -> String {
-        "Write the summary and every action item in \(language)."
-    }
-
-    /// Wrap the user's plain-text summary prompt so the one-shot call also
-    /// returns action items, WITHOUT embedding the summary in JSON. The
-    /// user's `summaryPrompt` still drives the summary's content and style
-    /// (including its `{{LANGUAGE}}` directive); this only appends the
-    /// output-format + action-item contract and the language directive.
-    /// Building the request here rather than baking it into the persisted
-    /// `summaryPrompt` means a user's customised prompt keeps working and no
-    /// persisted-default migration is needed.
-    static func promptWithActionItems(base: String, language: String) -> String {
-        """
-        \(base)
-
-        After the summary, list the action items. Format your ENTIRE response \
-        exactly like this — the plain-text summary first, then the marker on \
-        its own line, then a JSON array:
-
-        <the summary as plain text>
-        \(actionItemsSentinel)
-        [{"id": "stable-slug", "text": "...", "source": "inferred"}]
-
-        Write the summary as plain text — do NOT wrap it in JSON or quotes. \
-        Output the marker \(actionItemsSentinel) verbatim on its own line, then \
-        ONLY the JSON array and nothing after it. An action item is a concrete \
-        task someone committed to do (with or without a deadline) or an \
-        explicit follow-up or request. If there are none, output an empty \
-        array: []
-
-        \(languageDirective(language))
-        """
-    }
-
-    /// Append the synced event's notes to the one-shot summary prompt, as a
-    /// fenced non-transcript block. Returns `prompt` unchanged when the
-    /// recording has no calendar link or the user did not opt into the body.
+    /// The transcript as the model sees it: one line per speaker turn, each
+    /// labelled with the name the user assigned to that voice and, where they
+    /// assigned none, with the same friendly fallback the UI shows
+    /// (`Speaker A`, `Talare A`, …).
     ///
-    /// Same hazard `LiveAISession.promptWithContext` guards against, and the
-    /// same cure: an invite's notes are an agenda written before the meeting,
-    /// so an unlabelled block gets summarised as if it were said out loud. The
-    /// event's OWN title is deliberately not offered as a name for the meeting
-    /// — the recording's title already came from the event when the user chose
-    /// that, and telling the model what the meeting was called biases its
-    /// summary toward the title. `static` + pure for the wire format's test.
-    static func promptWithCalendarNotes(_ prompt: String, link: CalendarLink?) -> String {
-        guard let notes = link?.summaryNotes else { return prompt }
-        return """
-        \(prompt)
+    /// This used to be `recording.fullText` — every turn concatenated with no
+    /// label at all, so a summary could not say WHO decided anything, and a
+    /// name the user had painstakingly assigned to a voice was invisible to the
+    /// model that writes the overview. `TranscriptFormatter.plainText` alone is
+    /// not enough either: it falls back to the RAW diarizer id (`SPEAKER_00`),
+    /// which is not what the user sees on screen and invites the model to echo
+    /// `SPEAKER_00` back into the summary. Pre-resolving the map through
+    /// `displaySpeakerName` makes the prompt agree with the transcript view,
+    /// the clipboard and the `.srt` sidecar.
+    ///
+    /// Falls back to `fullText` when no segment carries a speaker at all
+    /// (diarization was off) — there is then nobody to tell apart.
+    static func transcriptForLLM(for recording: Recording) -> String {
+        TranscriptFormatter.plainText(segments: recording.segments,
+                                      fallback: recording.fullText,
+                                      names: speakerLabels(for: recording))
+    }
 
-        ---
-        BACKGROUND — the user synced this recording to a calendar event. Its notes are context for names, spellings and topics; they were written BEFORE the meeting, usually by someone else. Do NOT summarise them, do NOT turn them into action items, and do NOT report anything from them that the transcript does not mention.
-        \(notes)
-        """
+    /// Raw speaker id → the label to show the model for it. Built from the
+    /// segments rather than from `speakerNames`, so a name assigned to a voice
+    /// that never speaks in this recording cannot label someone else.
+    static func speakerLabels(for recording: Recording) -> [String: String] {
+        var labels: [String: String] = [:]
+        for segment in recording.segments {
+            guard let raw = segment.speaker, labels[raw] == nil else { continue }
+            labels[raw] = raw.displaySpeakerName(names: recording.speakerNames,
+                                                 language: recording.language)
+        }
+        return labels
+    }
+
+    /// Every voice that produced audio, in the order they first speak:
+    /// `Anna, Erik, Talare C`.
+    ///
+    /// This exists because `{{CALENDAR_ATTENDEES}}` cannot answer "who was in
+    /// the room": that list is the EVENT'S INVITE LIST — every `EKParticipant`
+    /// (Mila never reads a response status, so people who declined are in it),
+    /// capped at the user's attendee ceiling, snapshotted at sync time. It
+    /// contains people who never joined and omits whoever joined uninvited.
+    /// The voices here are the opposite evidence: they are only there because
+    /// audio came out of them.
+    ///
+    /// A voice the user never named still belongs, and gets the same fallback
+    /// label the transcript line and the UI use (`displaySpeakerName`) — the
+    /// list must not disagree with the turns above it. Names attached to a
+    /// voice that never speaks in THIS recording are not listed, and a name
+    /// suggestion the user has not accepted is not either: suggestions live in
+    /// `speakerNameSuggestions`, which `displaySpeakerName` never reads, so an
+    /// unconfirmed guess cannot enter a list that reads as attendance. Two
+    /// diarizer ids carrying the same name (a rename, or a split that left one
+    /// half unnamed) are listed once — a reader of the list counts people, not
+    /// cluster ids.
+    static func speakerList(for recording: Recording) -> String {
+        let labels = speakerLabels(for: recording)
+        var seenNames = Set<String>()
+        // `distinctSpeakers(in:)` is the shared "raw ids in first-appearance
+        // order" helper; the ordering of this list is pinned by a test, so a
+        // change to that helper cannot silently reorder it.
+        return SpeakerNameSuggester.distinctSpeakers(in: recording)
+            .compactMap { labels[$0] }
+            .filter { seenNames.insert($0).inserted }
+            .joined(separator: ", ")
+    }
+
+    /// The values substituted into the prompt's `{{VARIABLE}}` slots.
+    ///
+    /// A value Mila does not have is the EMPTY string, never a placeholder
+    /// word: `**Deltagare:** ` followed by nothing tells the model (and the
+    /// reader of the note) that nothing is known, whereas "unknown"/"N/A" is a
+    /// string that can end up inside the summary as if it were a fact.
+    ///
+    /// `{{EVENT_TITLE}}`, `{{CALENDAR_ATTENDEES}}` and `{{CALENDAR_NOTES}}`
+    /// render empty for an unlinked recording — and for a linked one whose
+    /// attendees or body the user kept private at sync time. That is the same
+    /// consent boundary the deleted hard-coded block respected: the stored link
+    /// records what was agreed to be sent, so a `regenerate` months later
+    /// cannot widen it. `{{EVENT_TITLE}}` is NEW as an input: the old block
+    /// withheld the event title on purpose ("telling the model what the meeting
+    /// was called biases its summary toward the title"). As a variable that
+    /// trade-off is the user's to make, not Mila's — and a note-writing prompt
+    /// needs the field for its own heading.
+    ///
+    /// `{{CALENDAR_ATTENDEES}}` and `{{SPEAKERS}}` answer different questions —
+    /// invited vs. audible — so a prompt that wants "who was here" needs the
+    /// second one, and the two together let the model note who was invited but
+    /// never spoke.
+    static func promptValues(for recording: Recording,
+                             languageName: String,
+                             transcript: String) -> [String: String] {
+        let start = recording.createdAt
+        let link = recording.calendarLink
+        return [
+            PromptVariable.language.rawValue: languageName,
+            PromptVariable.transcript.rawValue: transcript,
+            PromptVariable.speakers.rawValue: Self.speakerList(for: recording),
+            PromptVariable.title.rawValue: recording.title,
+            PromptVariable.date.rawValue: Self.format(start, format: "yyyy-MM-dd"),
+            PromptVariable.time.rawValue: Self.format(start, format: "HH:mm"),
+            PromptVariable.endTime.rawValue: Self.format(start.addingTimeInterval(recording.duration),
+                                                         format: "HH:mm"),
+            PromptVariable.duration.rawValue: Self.durationText(recording.duration),
+            PromptVariable.sourceApp.rawValue: recording.appName ?? "",
+            PromptVariable.eventTitle.rawValue: link?.eventTitle ?? "",
+            PromptVariable.attendees.rawValue: link.map { $0.attendees.joined(separator: ", ") } ?? "",
+            PromptVariable.eventNotes.rawValue: link?.summaryNotes ?? "",
+        ]
+    }
+
+    /// Fixed-format dates. `en_US_POSIX` so the output does not move with the
+    /// user's region settings — these strings go into a prompt (and into
+    /// Obsidian `[[YYYY-MM-DD]]` links), not onto a screen.
+    private static func format(_ date: Date, format: String) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = format
+        return formatter.string(from: date)
+    }
+
+    /// "47 min" / "1 h 5 min". Deliberately terse and unit-only: the wording
+    /// is the user's to write in their own language, so the value they
+    /// substitute stays as close to a number as possible.
+    static func durationText(_ seconds: Double) -> String {
+        let minutes = Int((seconds / 60).rounded())
+        if minutes < 60 { return "\(minutes) min" }
+        let hours = minutes / 60
+        let rest = minutes % 60
+        return rest == 0 ? "\(hours) h" : "\(hours) h \(rest) min"
     }
 
     /// Split raw CLI output into `(summary, items, origin)`, where `origin`
     /// names the branch that produced it so the tolerant paths are loggable.
     ///
     /// Resolution order, most-trusted first:
-    ///   1. Sentinel format (what `promptWithActionItems` asks for): plain
-    ///      summary before `actionItemsSentinel`, JSON array after it.
+    ///   1. Sentinel format (only reached when the user's own prompt asks for
+    ///      it — see `actionItemsSentinel`): plain summary before
+    ///      `actionItemsSentinel`, JSON array after it.
     ///   2. A JSON envelope `{"summary":...,"items":[...]}` the model may have
     ///      returned out of habit — decoded via `LiveAISession.parseEnvelope`.
     ///   3. Malformed JSON that LOOKS like an envelope (the failure the user
@@ -1026,8 +1024,8 @@ final class RecordingSummarizer: ObservableObject {
             // retried and the blob would be what the detail view, the Obsidian
             // note and the MCP surface all report forever. Report NO summary
             // instead — logged with this origin at the call site, exported as
-            // the transcript fallback, and still picked up by the next
-            // `backfillIfNeeded` sweep. That is the same treatment empty CLI
+            // the transcript fallback, and still re-summarizable: the row keeps
+            // no summary, so "Summarize" stays available. That is the same treatment empty CLI
             // output has always had (`test_summarize_drops_empty_output`), so
             // it is an established shape rather than a new one. Items the
             // lenient array parse recovered are still returned.

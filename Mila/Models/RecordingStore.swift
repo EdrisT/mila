@@ -72,8 +72,10 @@ final class RecordingStore: ObservableObject {
     ///
     /// `RecordingSummarizer` subscribes to cancel a summary call still out
     /// for a deleted row: otherwise the `claude -p` / `cursor-agent` child
-    /// runs to completion, holding one of its `maxConcurrent` slots and
-    /// spending an LLM call on output that has nowhere to go.
+    /// runs to completion and pays your provider for an overview that has
+    /// nowhere to go. Since #3934 that call is one the user asked for, so the
+    /// cancel is also the only thing that stops a request outliving the row it
+    /// belongs to.
     ///
     /// A subject rather than an `on…` closure because the subscriber lives
     /// on an object (with its own cancellable bag), not in `MilaApp.init`,
@@ -720,8 +722,8 @@ final class RecordingStore: ObservableObject {
         // (`markTranscriptionDeferred`) undoes the re-run exactly: the
         // transcript goes back to the status, language and model that
         // describe it, not the ones of the run that never happened (a stopped
-        // "Re-transcribe in Hebrew" must not leave English text labelled
-        // Hebrew). On the row — persisted — because the re-run may be stopped
+        // "Re-transcribe in Swedish" must not leave English text labelled
+        // Swedish). On the row — persisted — because the re-run may be stopped
         // only after a relaunch, from a process that never saw this call
         // (`Recording.retranscriptionPriorState`, island-io/mila#320).
         //
@@ -776,6 +778,32 @@ final class RecordingStore: ObservableObject {
         recordings[idx].summaryLanguage = code
         persist()
         return recordings[idx]
+    }
+
+    /// Flag a row's existing summary as no longer describing its transcript.
+    /// Called for a COMPLETED re-transcription (`wasRetranscription` in
+    /// `TranscriptionService.onTranscriptionCompleted`): the pass replaced the
+    /// text the summary was generated from, and the summary itself is kept — a
+    /// user who re-runs a meeting in a better model still wants the overview
+    /// they already have, they just must not read it as if it covered the new
+    /// transcript.
+    ///
+    /// No-ops, and persists nothing, when the row has no summary or is already
+    /// flagged. So the ordinary first pass over a fresh recording writes no new
+    /// key and leaves recordings.json byte-identical.
+    ///
+    /// Deliberately NOT called for a transcript edit, a speaker rename or a
+    /// merge: those change wording and labels on the same content, and flashing
+    /// "out of date" over a typo fix would train the user to ignore the badge.
+    @discardableResult
+    func markSummaryStale(recordingID: UUID, at date: Date = Date()) -> Bool {
+        guard let idx = recordings.firstIndex(where: { $0.id == recordingID }) else { return false }
+        let current = (recordings[idx].summary ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !current.isEmpty, recordings[idx].summaryStaleAt == nil else { return false }
+        recordings[idx].summaryStaleAt = date
+        persist()
+        return true
     }
 
     /// Assign (or clear, with nil/empty) a display name for one raw

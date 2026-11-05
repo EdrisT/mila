@@ -108,6 +108,11 @@ final class MilaConfigImporterTests: XCTestCase {
         suite.removePersistentDomain(forName: suiteName)
         let keychainKey = "MilaConfigTests.\(label).apiKey"
         KeychainHelper.delete(key: keychainKey)
+        // This fork defaults to the REMOTE backend (see `RemoteTranscriptionSettings.init`),
+        // so a truly fresh suite would start remote and every "absent field must not
+        // switch the backend" assertion below would be testing the wrong baseline.
+        // Pin the baseline the tests were written against.
+        suite.set(TranscriptionBackend.local.rawValue, forKey: "transcription.backend")
 
         let remote = RemoteTranscriptionSettings(defaults: suite, apiKeyKeychainKey: keychainKey)
         let language = RecordingLanguageSettings(defaults: suite)
@@ -218,11 +223,11 @@ final class MilaConfigImporterTests: XCTestCase {
     func test_plannedChanges_emptyWhenConfigMatchesCurrent() {
         let h = makeHarness()
         defer { KeychainHelper.delete(key: h.keychainKey) }
-        // Current: backend .local, language .hebrew (defaults).
+        // Current: backend .local, language .swedish (defaults).
         let config = MilaConfig(
             version: 1,
             remoteTranscription: .init(enabled: false),
-            recordingLanguage: "he"
+            recordingLanguage: "sv"
         )
         XCTAssertTrue(h.importer.plannedChanges(for: config).isEmpty)
     }

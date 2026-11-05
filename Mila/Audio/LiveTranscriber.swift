@@ -178,7 +178,7 @@ final class LiveTranscriber: ObservableObject {
     private var deletedRanges: [(start: Double, end: Double)] = []
     private var inFlight: Task<Void, Never>?
     private var tickTask: Task<Void, Never>?
-    private var language: String = "he"
+    private var language: String = "sv"
     /// Incremented on every `stop()` — and so on every `reset()` and
     /// `start()`, which begin with one. A `transcribeUtterance` call
     /// captures this at entry and re-checks before mutating state —

@@ -523,8 +523,8 @@ struct MilaApp: App {
         // whatever the host's UserDefaults happens to have.
         if CommandLine.arguments.contains("--ui-test-recording-lang-en") {
             langSettings.current = .english
-        } else if CommandLine.arguments.contains("--ui-test-recording-lang-he") {
-            langSettings.current = .hebrew
+        } else if CommandLine.arguments.contains("--ui-test-recording-lang-sv") {
+            langSettings.current = .swedish
         }
         // Force the "All Transcriptions" sidebar section EXPANDED when seeding
         // a recording for UI tests. `sidebar.allTranscriptions.expanded` is
@@ -586,9 +586,11 @@ struct MilaApp: App {
                                              liveAISettings: liveAI)
         // Speaker-name SUGGESTIONS (issue #348): "Your name" for the one voice
         // on a mic-only recording, and names the transcript states, offered
-        // for one-click accept. Runs once per fresh completion, after that
-        // recording's summary attempt settles (`markPending` below and in
-        // `finalizeTail`, `suggestIfPending` in `onSummaryFinished`). Owned
+        // for one-click accept. Runs once per fresh completion, directly from
+        // the completion hook (and from `finalizeTail` on the live-transcript
+        // path). It used to be deferred until that recording's automatic summary
+        // attempt settled — there is no automatic summary any more (#3934), so
+        // there is nothing to wait for. Owned
         // by `actions` (strong, like its other late-bound collaborators);
         // every closure here holds it weakly.
         let speakerIdentity = SpeakerIdentitySettings()
@@ -598,7 +600,7 @@ struct MilaApp: App {
                                                  identity: speakerIdentity)
         // Obsidian vault destination. When enabled, a completed recording is
         // written into the vault as a Markdown note (summary + action items,
-        // transcript fallback) once its summary is ready, then optionally
+        // transcript fallback) as soon as its transcript lands, then optionally
         // committed + pushed to git. Off by default.
         let obsidianSettings = ObsidianVaultSettings()
         // Opt-in gate for the bundled mila-mcp helper. Constructing it
@@ -636,26 +638,23 @@ struct MilaApp: App {
             NSWorkspace.shared.open(url)
         })
         let obsidian = ObsidianExporter(settings: obsidianSettings)
-        // Write the note once the summary state is final. Gated on `pending`
-        // so a launch-time backfill sweep never re-files the back-catalogue.
-        summarizer.onSummaryFinished = { [weak obsidian, weak nameSuggester] rec in
-            // First, and independent of Obsidian: a no-op unless a fresh
-            // completion marked this recording (never for backfill).
-            nameSuggester?.suggestIfPending(rec)
-            guard let obsidian, obsidian.isPending(rec.id) else { return }
-            obsidian.export(rec)
-            obsidian.clearPending(rec.id)
+        // A summary written after the note was filed re-writes the note, so the
+        // vault carries the overview instead of the transcript fallback. This is
+        // the ONLY thing the summarizer's completion hook drives now: the note
+        // itself is filed at transcription time, because there is no longer an
+        // automatic summary whose completion the write could wait for (#3934).
+        // `export` re-checks enabled + vault-picked itself, and refuses any
+        // recording the user discarded (its `discarded` tombstone).
+        summarizer.onSummaryFinished = { [weak obsidian] rec in
+            obsidian?.export(rec)
         }
-        // Wire the post-transcription summary hook. Fires for every
-        // recording that the queue successfully completes — the
-        // summarizer's own `shouldSummarize` gate skips work if a
-        // live summary already landed, if the LLM CLI isn't
-        // configured, or if the transcript came up empty.
-        //
-        // When `wasRetranscription` is true the recording had an old
-        // summary referring to the previous transcript; we force-
-        // regenerate so the user doesn't end up with a stale summary
-        // that disagrees with what the segments now say.
+        // Wire the post-transcription completion hook. Fires for every
+        // recording the queue successfully completes. Since #3934 it starts NO
+        // summary: that used to fire here, seconds before speaker identification
+        // finished, and then again with the names in it — two provider calls per
+        // meeting, the first summary thrown away. What it does instead: ask for
+        // speaker-name suggestions, publish the live-snapshot handoff, file the
+        // Obsidian note, and flag any summary this pass just invalidated.
         // Live-transcript sidecar for external tools (mila-mcp). Anchored
         // to the store's original root so tests / UI-test temp stores stay
         // isolated from the user's real app-support directory.
@@ -676,16 +675,14 @@ struct MilaApp: App {
         store.isTranscriptEditBlocked = { [weak svc] id in
             svc?.isAwaitingSpeakerFinalization(id) ?? false
         }
-        svc.onTranscriptionCompleted = { [weak summarizer, weak llm, weak obsidianSettings, weak obsidian, weak sidecarWriter, weak nameSuggester] rec, wasRetranscription in
-            // Speaker-name suggestions for this pass's (re-keyed) speakers,
-            // once the summary attempt below settles. With no summarizer
-            // there is no settle signal to wait for, so run them now rather
-            // than leave a mark nothing will consume.
-            if summarizer != nil {
-                nameSuggester?.markPending(rec.id)
-            } else {
-                nameSuggester?.suggest(recordingID: rec.id)
-            }
+        // `store` is captured STRONGLY on purpose (it is app-lifetime): a weak
+        // capture that went nil would silently stop flagging stale summaries,
+        // which is the one failure mode here that nothing would notice.
+        svc.onTranscriptionCompleted = { [weak obsidianSettings, weak obsidian, weak sidecarWriter, weak nameSuggester] rec, wasRetranscription in
+            // Speaker-name suggestions for this pass's (re-keyed) speakers. The
+            // suggester gates itself on `isSpeakerNameSuggestionReady`, so this
+            // costs nothing with voice naming off or no provider configured.
+            nameSuggester?.suggest(recordingID: rec.id)
             // A recording whose live transcript wasn't final closed its live
             // sidecar WITHOUT a handoff id, because at Stop the batch worker
             // hadn't produced the transcript yet. It just did — so publish the
@@ -693,30 +690,19 @@ struct MilaApp: App {
             // false)` deferred. A no-op unless this is that exact recording
             // and its snapshot is still the one on disk; see `attachHandoff`.
             sidecarWriter?.attachHandoff(forRecording: rec.id)
-            // Obsidian export is driven off the summarizer's completion hook.
-            // Mark this fresh completion pending so the hook knows to write it
-            // (backfilled recordings are never marked, hence never re-filed).
+            // Obsidian: file the note from the transcript now. If the user later
+            // asks for a summary, the summarizer's hook re-writes the same note.
             let obsidianOn = (obsidianSettings?.enabled == true) && (obsidianSettings?.vaultURL != nil)
+            if obsidianOn { obsidian?.export(rec) }
+            // A completed RE-TRANSCRIPTION replaced the transcript an existing
+            // summary was generated from. The summary is KEPT — reading the old
+            // overview of a meeting you re-ran in a better model is still useful
+            // — but the row now says it describes text that no longer exists, and
+            // the badge plus "Regenerate summary" leave the decision to spend
+            // another provider call to the user. No-op when the row has no
+            // summary, so an ordinary first pass writes no new key.
             if wasRetranscription {
-                // `regenerate` bypasses the "already has a summary" gate by
-                // design (it's also the manual on-demand path), so it does
-                // NOT consult `summaryEnabled` itself. Guard the AUTOMATIC
-                // re-transcription trigger here so a transcript-only user
-                // doesn't get a summary regenerated behind their back.
-                guard llm?.summaryEnabled ?? true else {
-                    // No summary will be regenerated — export immediately with
-                    // the transcript fallback (no summarizer hook to wait for).
-                    if obsidianOn { obsidian?.export(rec) }
-                    // No summarizer hook here either, so settle the pending
-                    // speaker-name suggestions now.
-                    nameSuggester?.suggestIfPending(rec)
-                    return
-                }
-                if obsidianOn { obsidian?.markPending(rec.id) }
-                summarizer?.regenerate(rec)
-            } else {
-                if obsidianOn { obsidian?.markPending(rec.id) }
-                summarizer?.summarizeIfNeeded(rec)
+                store.markSummaryStale(recordingID: rec.id)
             }
         }
         // Cross-recording voice recognition. Opt-in and off by default:
@@ -1165,7 +1151,6 @@ struct MilaApp: App {
                 .task { await wireLiveAIPipeline() }
                 .task { await injectFixtureWavIfRequested() }
                 .task { await runFinalizeRegressionIfRequested() }
-                .task { recordingSummarizer.backfillIfNeeded() }
                 .task { voiceMemosImporter.start() }
                 .environmentObject(recordingSummarizer)
                 .environmentObject(meetingDetectionSettings)
@@ -1263,8 +1248,8 @@ struct MilaApp: App {
                 Button("English Dictation (\(hotkeySettings.binding(for: .dictateEnglish).displayName))") {
                     Task { await dictation.toggle(action: .dictateEnglish) }
                 }
-                Button("Hebrew Dictation (\(hotkeySettings.binding(for: .dictateHebrew).displayName))") {
-                    Task { await dictation.toggle(action: .dictateHebrew) }
+                Button("Swedish Dictation (\(hotkeySettings.binding(for: .dictateSwedish).displayName))") {
+                    Task { await dictation.toggle(action: .dictateSwedish) }
                 }
             }
             // Surface the diagnostic-report action under Help so a user

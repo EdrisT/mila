@@ -369,7 +369,7 @@ final class RecordingTests: XCTestCase {
     /// from the JSON when unset (so an untouched recordings.json is written
     /// byte-for-byte as before), and a legacy record without the key decodes
     /// to nil. The typed accessor accepts only the two known codes: anything
-    /// else in the file is treated as "no override", never as Hebrew.
+    /// else in the file is treated as "no override", never as Swedish.
     func test_summaryLanguage_round_trips_is_omitted_when_nil_and_rejects_unknown_codes() throws {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -382,22 +382,25 @@ final class RecordingTests: XCTestCase {
                        "nil must not be written — existing files stay unchanged")
         XCTAssertNil(try decoder.decode(Recording.self, from: Data(unsetJSON.utf8)).summaryLanguage)
 
-        let overridden = Recording(title: "Hebrew summary", source: .meeting,
+        let overridden = Recording(title: "Swedish summary", source: .meeting,
                                    audioFileName: "h.wav", language: "en",
-                                   summaryLanguage: "he")
+                                   summaryLanguage: "sv")
         let decoded = try decoder.decode(Recording.self, from: try encoder.encode(overridden))
-        XCTAssertEqual(decoded.summaryLanguage, "he")
-        XCTAssertEqual(decoded.summaryLanguageOverride, .hebrew)
+        XCTAssertEqual(decoded.summaryLanguage, "sv")
+        XCTAssertEqual(decoded.summaryLanguageOverride, .swedish)
         XCTAssertEqual(decoded.language, "en",
                        "the summary language is independent of the transcription language")
 
         var unknown = overridden
         unknown.summaryLanguage = "fr"
         XCTAssertNil(unknown.summaryLanguageOverride,
-                     "an unrecognised persisted code is not an override (and not Hebrew)")
-        unknown.summaryLanguage = "he-IL"
+                     "an unrecognised persisted code is not an override (and not Swedish)")
+        unknown.summaryLanguage = "sv-SE"
         XCTAssertNil(unknown.summaryLanguageOverride,
                      "only the exact raw values count; regional forms are not written by the app")
+        unknown.summaryLanguage = "he"
+        XCTAssertNil(unknown.summaryLanguageOverride,
+                     "a `he` left by a build that still offered Hebrew is not an override either")
     }
 
     /// The Voice-Memo source-folder field (issue #57) round-trips, and a legacy

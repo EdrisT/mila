@@ -1,10 +1,17 @@
 import XCTest
 @testable import Mila
 
-/// Verifies the sequencing contract between `RecordingSummarizer` and
-/// `ObsidianExporter`: a fresh completion is marked pending and exported only
-/// once the summary is ready, while a summary produced without being marked
-/// pending (e.g. launch-time backfill) is NOT exported — no vault spam.
+/// Verifies how `RecordingSummarizer` and `ObsidianExporter` are sequenced.
+///
+/// Since #3934 the note is filed from the transcription-completion hook, straight
+/// from the transcript — there is no automatic summary whose completion the write
+/// could wait for, so the old `pending` gate is gone. What remains of the
+/// sequencing contract, and what these tests pin:
+///   * a summary written later (the user pressed Summarize / Regenerate)
+///     RE-writes the same note, so the vault carries the overview rather than the
+///     transcript fallback;
+///   * a recording that left the store — deleted, trashed, or discarded — is
+///     never filed by a completion hook that arrives afterwards.
 @MainActor
 final class ObsidianExportSequencingTests: XCTestCase {
 
@@ -37,7 +44,7 @@ final class ObsidianExportSequencingTests: XCTestCase {
         llmDefaults = UserDefaults(suiteName: llmSuite)
         liveDefaults = UserDefaults(suiteName: liveSuite)
         obsidianDefaults = UserDefaults(suiteName: obsSuite)
-        llm = LLMSettings(defaults: llmDefaults)
+        llm = LLMSettings(defaults: UserDefaults(suiteName: llmSuite)!)
         llm.tool = .claude
         liveAI = LiveAISettings(defaults: liveDefaults)
         liveAI.model = ""
@@ -48,13 +55,12 @@ final class ObsidianExportSequencingTests: XCTestCase {
         XCTAssertTrue(settings.setVault(vault))
         exporter = ObsidianExporter(settings: settings, defaults: obsidianDefaults)
 
-        // Wire the hook exactly like MilaApp does.
+        // Wire the hook exactly like MilaApp does: the summarizer's completion
+        // re-files the note so it carries the summary.
         summarizer = RecordingSummarizer(store: store, llmSettings: llm, liveAISettings: liveAI,
                                          runLLM: { _, _, _, _, _, _, _, _, _, _, _ in "A tidy summary." })
         summarizer.onSummaryFinished = { [weak exporter] rec in
-            guard let exporter, exporter.isPending(rec.id) else { return }
-            exporter.export(rec)
-            exporter.clearPending(rec.id)
+            exporter?.export(rec)
         }
     }
 
@@ -74,9 +80,7 @@ final class ObsidianExportSequencingTests: XCTestCase {
                                              throw StubFailure()
                                          })
         summarizer.onSummaryFinished = { [weak exporter] rec in
-            guard let exporter, exporter.isPending(rec.id) else { return }
-            exporter.export(rec)
-            exporter.clearPending(rec.id)
+            exporter?.export(rec)
         }
     }
 
@@ -89,90 +93,80 @@ final class ObsidianExportSequencingTests: XCTestCase {
         return rec
     }
 
-    func test_pending_recording_is_exported_after_summary() async throws {
-        let rec = addRecording()
-        exporter.markPending(rec.id)
-        summarizer.summarizeIfNeeded(rec)
-        await summarizer.awaitInFlight(rec.id)
-
-        let expected = vault.appendingPathComponent(ObsidianExporter.fileName(for: rec))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: expected.path),
-                      "a pending recording should be written once its summary lands")
-        let contents = try String(contentsOf: expected, encoding: .utf8)
-        XCTAssertTrue(contents.contains("A tidy summary."))
+    private func notePath(for rec: Recording) -> URL {
+        vault.appendingPathComponent(ObsidianExporter.fileName(for: rec))
     }
 
-    func test_non_pending_summary_is_not_exported() async throws {
-        let rec = addRecording()
-        // No markPending — models a backfill sweep.
-        summarizer.summarizeIfNeeded(rec)
-        await summarizer.awaitInFlight(rec.id)
-
-        let expected = vault.appendingPathComponent(ObsidianExporter.fileName(for: rec))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: expected.path),
-                       "a summary produced without a pending mark must not be filed")
-    }
-
-    func test_pending_export_falls_back_to_transcript_when_summaries_disabled() async throws {
-        llm.summaryEnabled = false   // no summary will be generated
+    /// The summary path re-writes the note the completion hook already filed, so
+    /// the vault ends up with the overview rather than the transcript fallback.
+    func test_a_summary_landing_after_the_note_rewrites_it() async throws {
         let rec = addRecording(fullText: "the raw transcript body")
-        exporter.markPending(rec.id)
-        // summarizeIfNeeded skips synchronously and fires onSummaryFinished.
+        // The completion hook's write: transcript only, no summary yet.
+        XCTAssertNotNil(exporter.export(rec))
+        var contents = try String(contentsOf: notePath(for: rec), encoding: .utf8)
+        XCTAssertTrue(contents.contains("## Transcript"), "precondition: the fallback note")
+        XCTAssertFalse(contents.contains("A tidy summary."))
+
         summarizer.summarizeIfNeeded(rec)
         await summarizer.awaitInFlight(rec.id)
 
-        let expected = vault.appendingPathComponent(ObsidianExporter.fileName(for: rec))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: expected.path))
-        let contents = try String(contentsOf: expected, encoding: .utf8)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: notePath(for: rec).path))
+        contents = try String(contentsOf: notePath(for: rec), encoding: .utf8)
+        XCTAssertTrue(contents.contains("A tidy summary."),
+                      "the note must carry the summary once one exists")
+    }
+
+    /// A note written before any summary exists is a transcript-fallback note —
+    /// and with automatic summaries gone that is the state most recordings sit in
+    /// until the user asks.
+    func test_a_recording_is_filed_from_the_transcript_alone() throws {
+        let rec = addRecording(fullText: "the raw transcript body")
+        XCTAssertNotNil(exporter.export(rec))
+        let contents = try String(contentsOf: notePath(for: rec), encoding: .utf8)
         XCTAssertTrue(contents.contains("## Transcript"))
         XCTAssertTrue(contents.contains("the raw transcript body"))
     }
 
-    /// A failed summary still resolves the pending export — it must not hang
-    /// waiting for a summary that will never arrive.
-    func test_failed_summary_still_exports_the_transcript() async throws {
+    /// A failed summary must not damage the note that is already there.
+    func test_a_failed_summary_leaves_the_filed_note_alone() async throws {
         useFailingLLM()
         let rec = addRecording(fullText: "the raw transcript body")
-        exporter.markPending(rec.id)
+        XCTAssertNotNil(exporter.export(rec))
         summarizer.summarizeIfNeeded(rec)
         await summarizer.awaitInFlight(rec.id)
 
-        let expected = vault.appendingPathComponent(ObsidianExporter.fileName(for: rec))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: expected.path),
-                      "a failed summary must fall back, not stall the export")
-        XCTAssertFalse(exporter.isPending(rec.id), "the pending mark must be cleared")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: notePath(for: rec).path),
+                      "a failed summary must not take the note out")
+        let contents = try String(contentsOf: notePath(for: rec), encoding: .utf8)
+        XCTAssertTrue(contents.contains("the raw transcript body"))
     }
 
-    /// Deleted mid-flight: the failure path must not fire the hook with the
-    /// stale enqueue-time copy, or a recording the user just deleted lands in
+    /// Deleted mid-flight — the failure path. The hook must not fire with the
+    /// caller's enqueue-time copy, or a recording the user just deleted lands in
     /// the vault anyway.
     func test_recording_deleted_mid_flight_is_not_exported() async throws {
         useFailingLLM()
         let rec = addRecording(fullText: "the raw transcript body")
-        exporter.markPending(rec.id)
         summarizer.summarizeIfNeeded(rec)
         store.permanentlyDelete(rec)
         await summarizer.awaitInFlight(rec.id)
 
-        let expected = vault.appendingPathComponent(ObsidianExporter.fileName(for: rec))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: expected.path),
+        XCTAssertFalse(FileManager.default.fileExists(atPath: notePath(for: rec).path),
                        "a recording deleted mid-flight must not be filed")
     }
 
-    /// The same race on the SUCCESS path. `test_recording_deleted_mid_flight…`
-    /// above forces a failure, so it only exercises the `catch` block's
-    /// liveness check; this one lets the summary complete normally so the
-    /// separate guard on the success path (`RecordingSummarizer`'s
-    /// "is this recording still in the store?" lookup) is the thing under test.
+    /// The same race on the SUCCESS path: `test_recording_deleted_mid_flight…`
+    /// above forces a failure, so it only exercises the `catch` block's liveness
+    /// check; this one lets the summary complete normally so the separate guard
+    /// on the success path (`RecordingSummarizer`'s "is this recording still in
+    /// the store?" lookup) is the thing under test.
     func test_recording_deleted_mid_flight_is_not_exported_on_the_success_path() async throws {
         let rec = addRecording(fullText: "the raw transcript body")
-        exporter.markPending(rec.id)
         summarizer.summarizeIfNeeded(rec)
         store.permanentlyDelete(rec)
         await summarizer.awaitInFlight(rec.id)
 
-        let expected = vault.appendingPathComponent(ObsidianExporter.fileName(for: rec))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: expected.path),
+        XCTAssertFalse(FileManager.default.fileExists(atPath: notePath(for: rec).path),
                        "a recording deleted mid-flight must not be filed, "
                        + "even when its summary succeeds")
     }
@@ -181,13 +175,11 @@ final class ObsidianExportSequencingTests: XCTestCase {
     /// but the exporter refuses to file a trashed recording.
     func test_recording_trashed_mid_flight_is_not_exported() async throws {
         let rec = addRecording()
-        exporter.markPending(rec.id)
         summarizer.summarizeIfNeeded(rec)
         store.softDelete(rec)
         await summarizer.awaitInFlight(rec.id)
 
-        let expected = vault.appendingPathComponent(ObsidianExporter.fileName(for: rec))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: expected.path),
+        XCTAssertFalse(FileManager.default.fileExists(atPath: notePath(for: rec).path),
                        "a recording trashed mid-flight must not be filed")
     }
 
@@ -198,31 +190,24 @@ final class ObsidianExportSequencingTests: XCTestCase {
     /// ignored.
     func test_discardNote_removes_an_already_exported_note() async throws {
         let rec = addRecording()
-        exporter.markPending(rec.id)
-        summarizer.summarizeIfNeeded(rec)
-        await summarizer.awaitInFlight(rec.id)
-        let expected = vault.appendingPathComponent(ObsidianExporter.fileName(for: rec))
-        XCTAssertTrue(FileManager.default.fileExists(atPath: expected.path), "precondition")
+        XCTAssertNotNil(exporter.export(rec), "precondition")
 
         exporter.discardNote(for: rec)
 
-        XCTAssertFalse(FileManager.default.fileExists(atPath: expected.path),
+        XCTAssertFalse(FileManager.default.fileExists(atPath: notePath(for: rec).path),
                        "the note for a discarded recording is still in the vault")
     }
 
-    /// The other ordering: Discard lands while the summary is still running,
-    /// so the export hasn't happened yet and must never happen.
+    /// The other ordering: Discard lands while the summary is still running, so
+    /// the re-write it triggers must never happen.
     func test_discard_before_the_summary_lands_blocks_the_export() async throws {
         let rec = addRecording()
-        exporter.markPending(rec.id)
         summarizer.summarizeIfNeeded(rec)
         exporter.discardNote(for: rec)
         await summarizer.awaitInFlight(rec.id)
 
-        let expected = vault.appendingPathComponent(ObsidianExporter.fileName(for: rec))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: expected.path),
+        XCTAssertFalse(FileManager.default.fileExists(atPath: notePath(for: rec).path),
                        "a summary landing after Discard must not file the note")
-        XCTAssertFalse(exporter.isPending(rec.id))
     }
 
     /// Nothing was ever written for this recording — removal is a no-op rather
@@ -232,34 +217,31 @@ final class ObsidianExportSequencingTests: XCTestCase {
         XCTAssertNil(exporter.discardNote(for: rec))
     }
 
-    /// Discard has to be a TOMBSTONE, not a cleared flag.
+    /// Discard has to be a TOMBSTONE, not "delete the note if there is one".
     /// `PostRecordingCoordinator.cancelAndDiscard` does not cancel
     /// `QuickActionsController.finalizeTail`, which is still running — on the
-    /// VAD path it awaits the OFFLINE re-diarize — and ends by re-`markPending`ing
-    /// the same id. A *skipped* summary (summaries off, LLM unconfigured, empty
-    /// transcript) then fires `onSummaryFinished` synchronously with a fallback
-    /// snapshot, and that hook's only gate is `isPending`. So with a cleared
-    /// flag the note lands for a recording the user threw away.
+    /// VAD path it awaits the OFFLINE re-diarize — and ends by exporting the note
+    /// itself. A *skipped* summary (no provider configured, empty transcript)
+    /// also fires `onSummaryFinished` synchronously. So the tombstone, not the
+    /// absence of a note, is what keeps a discarded recording out of the vault.
     func test_a_late_finalize_tail_cannot_re_export_a_discarded_recording() async throws {
         let rec = addRecording()
         // The reachable path: no summary will be generated, so the completion
         // hook fires synchronously rather than going through `runSummary`
         // (whose "is the row still in the store?" lookup already covers the
         // success path).
-        llm.summaryEnabled = false
+        llm.tool = .none
 
         exporter.discardNote(for: rec)
         store.permanentlyDelete(rec)   // as `cancelAndDiscard` does
 
-        // `finalizeTail`, still in flight, re-arms and drives the summary.
-        exporter.markPending(rec.id)
-        XCTAssertFalse(exporter.isPending(rec.id),
-                       "a discarded recording must not be able to re-arm the export gate")
+        // `finalizeTail`, still in flight, drives the export for the same id.
+        XCTAssertNil(exporter.export(rec),
+                     "a discarded recording must not be exportable by a late hook")
         summarizer.summarizeIfNeeded(rec)
         await summarizer.awaitInFlight(rec.id)
 
-        let expected = vault.appendingPathComponent(ObsidianExporter.fileName(for: rec))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: expected.path),
+        XCTAssertFalse(FileManager.default.fileExists(atPath: notePath(for: rec).path),
                        "a recording the user discarded must not be filed by a late completion hook")
     }
 

@@ -47,7 +47,7 @@ remoteTranscription        dictionary   the remote (OpenAI-compatible) transcrip
 ├─ model                   string       model id the server expects
 ├─ englishModel            string       model id for English recordings ("" = use model for all)
 └─ apiKey                  string       bearer token — read "Secrets" below first
-recordingLanguage          string       he or en (regional forms like en-US accepted)
+recordingLanguage          string       sv or en (regional forms like en-US accepted)
 liveAI                     dictionary
 ├─ enabled                 boolean      Live AI mode on/off
 └─ model                   string       model passed to the AI CLI for the live loop
@@ -60,7 +60,7 @@ meetingDetection           dictionary
 | Top-level key | Type | Keys inside it |
 |---|---|---|
 | `remoteTranscription` | dictionary | `enabled` (boolean), `endpoint` (string), `model` (string), `englishModel` (string), `apiKey` (string) |
-| `recordingLanguage` | string | — (`he` or `en`) |
+| `recordingLanguage` | string | — (`sv` or `en`) |
 | `liveAI` | dictionary | `enabled` (boolean), `model` (string) |
 | `diarization` | dictionary | `enabled` (boolean) |
 | `meetingDetection` | dictionary | `enabled` (boolean) |
@@ -70,12 +70,18 @@ Notes on individual keys:
 - `endpoint`: Mila appends `audio/transcriptions` to it.
 - `englishModel`: for servers whose main model is Hebrew-only (an ivrit.ai
   finetune, for example). An empty string means `model` handles every language.
-- `recordingLanguage`: must be `he`, `iw` or `en`, or a regional form of one
-  (`en-US`, `he_IL`). **Any other value is not applied** (and is logged):
+- `recordingLanguage`: must be `sv` or `en`, or a regional form of one
+  (`en-US`, `sv_SE`). **Any other value is not applied** (and is logged):
   rather than guessing a language, the setting stays locked at whatever each
   user already had. **Locking it disables the language
   picker in the toolbar**, so users can no longer switch language per recording
   — leave it out unless that is what you want.
+
+  Profiles handed out before Hebrew was replaced by Swedish pinned this to
+  `he`. That value is no longer usable (Hebrew is not an offered language any
+  more), so the field stays *locked* but holds whatever language each user has
+  — which after the upgrade is Swedish. Re-issue the profile with `sv` (or `en`)
+  to pin it again.
 
 > **Flat keys.** Some MDM consoles make it easy to enter a key like
 > `diarization.enabled` as a single flat key. That name happens to be the key

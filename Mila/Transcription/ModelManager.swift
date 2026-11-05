@@ -69,8 +69,10 @@ struct WhisperModel: Identifiable, Hashable, Codable {
     static let all: [WhisperModel] = [.ivritLarge, .openaiTurbo]
 
     /// Pick the best model the catalog knows about for a given ISO language
-    /// code. Hebrew goes to ivrit.ai's large-v3 finetune; everything else
-    /// (including the dictation English path) goes to the OpenAI turbo.
+    /// code. Swedish — the language Mila offers by default — and English both
+    /// go to the multilingual OpenAI turbo, which is the only model here that
+    /// handles both. The Hebrew codes stay so a recording an older build saved
+    /// in `"he"` still re-transcribes against ivrit.ai's finetune.
     static func bestModel(for languageCode: String) -> WhisperModel {
         switch languageCode.lowercased() {
         case "he", "he-il", "iw":
@@ -113,7 +115,7 @@ final class ModelManager: NSObject, ObservableObject {
 
     /// True when `selectedModelName` was restored from a choice the user
     /// actually persisted via `setSelected(_:)`, rather than defaulted to the
-    /// catalog's `ivritLarge`. Launch-time bootstrap consults this so it only
+    /// catalog's `openaiTurbo`. Launch-time bootstrap consults this so it only
     /// ever *establishes* a default selection on a fresh install: re-asserting
     /// one on every launch is what silently reverted the user's Settings →
     /// Models choice, and — once deletion started sticking — kept re-selecting
@@ -144,7 +146,12 @@ final class ModelManager: NSObject, ObservableObject {
         self.defaults = defaults
         self.sessionProtocolClasses = sessionProtocolClasses
         let lastUsed = defaults.string(forKey: "selectedModelName")
-        self.selectedModelName = lastUsed ?? WhisperModel.ivritLarge.name
+        // The Swedish-first default. Nothing is auto-downloaded in this fork,
+        // but this is the model Settings → Models pre-selects and the one
+        // `model(for:)` falls back to when the language-best model isn't on
+        // disk — so a fresh install must default to something that can
+        // transcribe the language the app offers (ivrit.ai is Hebrew-only).
+        self.selectedModelName = lastUsed ?? WhisperModel.openaiTurbo.name
         self.hasPersistedSelection = lastUsed != nil
         let declined = defaults.array(forKey: Self.declinedModelsKey) as? [String] ?? []
         self.declinedModelNames = Set(declined)

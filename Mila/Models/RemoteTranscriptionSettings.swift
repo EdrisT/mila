@@ -443,7 +443,7 @@ final class RemoteTranscriptionSettings: ObservableObject {
     /// mirror of `ModelManager.model(for:)`, which does the same routing for the
     /// on-device backend.
     ///
-    /// * `he` (and legacy `iw`/unrecognised codes) → `model`, the primary.
+    /// * `sv` (and unrecognised/retired codes) → `model`, the primary.
     /// * `en` → `englishModel`.
     /// * legacy `auto` → `englishModel`, the only one that can serve a
     ///   detect-the-language request. Auto-detect was retired as a user
@@ -458,7 +458,7 @@ final class RemoteTranscriptionSettings: ObservableObject {
         guard !english.isEmpty else { return primary }
         if languageCode.lowercased() == "auto" { return english }
         switch RecordingLanguage.fromCode(languageCode) {
-        case .hebrew:   return primary
+        case .swedish:  return primary
         case .english:  return english
         }
     }
@@ -502,9 +502,11 @@ final class RemoteTranscriptionSettings: ObservableObject {
     /// check (auth accepted, model loaded, transcription works) rather than a
     /// bare `GET /models` that only proves the server answers HTTP.
     private static let testSampleResource = "ConnectionTestSample"
-    /// The bundled clip is Hebrew; force `he` so the ivrit model (Hebrew-only)
-    /// and multilingual models alike transcribe it accurately, independent of
-    /// the user's recording-language setting.
+    /// The bundled clip is Hebrew, so we force `he` on the probe request:
+    /// every Whisper model is multilingual, so this transcribes on a Swedish /
+    /// English deployment just as well as on a Hebrew one, and the probe stays
+    /// independent of the user's recording-language setting. Hebrew here is a
+    /// property of the audio file, not a language Mila offers.
     private static let testSampleLanguage = "he"
 
     /// Send the bundled sample clip to `/audio/transcriptions` and verify the

@@ -344,7 +344,7 @@ final class TranscriptionDeferralTests: XCTestCase {
         XCTAssertEqual(kept.fullText, "an earlier, complete transcript")
     }
 
-    /// "Re-transcribe in Hebrew" on an English recording, stopped mid-pass:
+    /// "Re-transcribe in Swedish" on an English recording, stopped mid-pass:
     /// the English transcript stays, so everything describing it has to go
     /// back too — or the English text renders right-to-left with Hebrew
     /// speaker labels, MCP reports it as Hebrew, and "Re-transcribe

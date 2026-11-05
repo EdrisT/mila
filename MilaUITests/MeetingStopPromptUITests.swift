@@ -29,6 +29,19 @@ final class MeetingStopPromptUITests: XCTestCase {
         XCTAssertTrue(stopPrompt.waitForExistence(timeout: 15),
                       "Stop-recording prompt did not appear after the meeting ended while recording")
 
+        // The card starts COLLAPSED — `MeetingPromptOverlay`'s `expanded` is
+        // false, and the subtitle + primary/dismiss buttons live behind the
+        // "More options" chevron (`if expanded` at MeetingPromptOverlay.swift:332).
+        // So a test that wants the primary button has to expand the card first;
+        // asserting its identifier on the collapsed card looked for a control
+        // the overlay never renders.
+        let chevron = app.descendants(matching: .any)
+            .matching(identifier: "meetingStopPrompt.chevron")
+            .firstMatch
+        XCTAssertTrue(chevron.waitForExistence(timeout: 5),
+                      "Stop-recording prompt has no 'More options' chevron to expand")
+        chevron.click()
+
         // The primary action button should read / identify as "Stop recording".
         let stopButton = app.descendants(matching: .any)
             .matching(identifier: "meetingStopPrompt.primary")

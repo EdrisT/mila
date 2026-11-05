@@ -105,6 +105,9 @@ final class AISettingsKeyCompatibilityTests: XCTestCase {
         defaults.set("Give me a title", forKey: "llm.name.prompt")
         defaults.set(true, forKey: "llm.action.enabled")
         defaults.set("Email this to the team", forKey: "llm.action.prompt")
+        // The automatic-summary switch is gone (#3934) but its key is not: a
+        // user who turned automatic summaries OFF must not have that stored
+        // "no" reclaimed, and no code may write the key again.
         defaults.set(false, forKey: "llm.summary.enabled")
 
         let llm = makeLLM()
@@ -112,16 +115,15 @@ final class AISettingsKeyCompatibilityTests: XCTestCase {
         XCTAssertEqual(llm.namePrompt, "Give me a title")
         XCTAssertTrue(llm.postActionEnabled)
         XCTAssertEqual(llm.postActionPrompt, "Email this to the team")
-        XCTAssertFalse(llm.summaryEnabled,
-                       "An explicit opt-out of automatic summaries must survive the tab merge")
 
         llm.namePrompt = "Three words only"
         llm.postActionPrompt = "Translate to English"
-        llm.summaryEnabled = true
+        llm.speakerNameSuggestionsEnabled = false
 
         XCTAssertEqual(defaults.string(forKey: "llm.name.prompt"), "Three words only")
         XCTAssertEqual(defaults.string(forKey: "llm.action.prompt"), "Translate to English")
-        XCTAssertTrue(defaults.bool(forKey: "llm.summary.enabled"))
+        XCTAssertEqual(defaults.object(forKey: "llm.summary.enabled") as? Bool, false,
+                       "nothing reads or writes the retired automatic-summary key")
     }
 
     // MARK: - Controls the merge moved between sections
@@ -130,8 +132,13 @@ final class AISettingsKeyCompatibilityTests: XCTestCase {
         // Sits at the top of AI Features now — it governs generated content,
         // not the connection, and drives BOTH the automatic summary and the
         // Live AI loop. Still persisted where it always was.
+        defaults.set("sv", forKey: "liveAI.outputLanguage")
+        XCTAssertEqual(LiveAISettings(defaults: defaults).outputLanguage, .swedish)
+
+        // A `he` left by a build that offered Hebrew is not a value any more:
+        // the safe reading is Auto, not "silently pick the other language".
         defaults.set("he", forKey: "liveAI.outputLanguage")
-        XCTAssertEqual(LiveAISettings(defaults: defaults).outputLanguage, .hebrew)
+        XCTAssertEqual(LiveAISettings(defaults: defaults).outputLanguage, .auto)
 
         let live = LiveAISettings(defaults: defaults)
         live.outputLanguage = .english
@@ -198,8 +205,11 @@ final class AISettingsKeyCompatibilityTests: XCTestCase {
         XCTAssertEqual(SettingsTab.aiFeatures.rawValue, 4)
         XCTAssertEqual(SettingsTab.speakers.rawValue, 5)
         XCTAssertEqual(SettingsTab.meetings.rawValue, 6)
-        XCTAssertEqual(SettingsTab.voiceMemos.rawValue, 7)
-        XCTAssertEqual(SettingsTab.storage.rawValue, 8)
+        // `calendar` (the event-linking destination) sits between meetings and
+        // voice memos, so it owns 7 and shifts the last two.
+        XCTAssertEqual(SettingsTab.calendar.rawValue, 7)
+        XCTAssertEqual(SettingsTab.voiceMemos.rawValue, 8)
+        XCTAssertEqual(SettingsTab.storage.rawValue, 9)
     }
 
     // MARK: - Sidebar destination inventory (#177)
@@ -291,20 +301,36 @@ final class AISettingsKeyCompatibilityTests: XCTestCase {
     }
 
     func test_feature_switches_moved_to_row_headers_keep_their_keys() {
-        // The four AI Features rows each expose a real `Toggle` in the row
-        // header instead of an On/Off label plus a switch hidden one
-        // disclosure down. Same four keys behind them.
+        // Each switchable AI Features row exposes a real `Toggle` in the row
+        // header instead of an On/Off label plus a switch hidden one disclosure
+        // down. Same keys behind them. (The summary row has no switch at all
+        // since #3934 — see `test_feature_toggles_and_prompts_round_trip` for
+        // what happened to its key.)
         let llm = makeLLM()
-        llm.summaryEnabled = true
         llm.nameGenerationEnabled = true
         llm.postActionEnabled = true
+        llm.speakerNameSuggestionsEnabled = true
 
-        XCTAssertTrue(defaults.bool(forKey: "llm.summary.enabled"))
         XCTAssertTrue(defaults.bool(forKey: "llm.name.enabled"))
         XCTAssertTrue(defaults.bool(forKey: "llm.action.enabled"))
+        XCTAssertTrue(defaults.bool(forKey: "llm.speakerNames.enabled"))
 
         let live = LiveAISettings(defaults: defaults)
         live.enabled = true
         XCTAssertTrue(defaults.bool(forKey: "liveAI.enabled"))
+    }
+
+    /// What the picker shows vs. what `{{LANGUAGE}}` becomes. `.auto` is the
+    /// one that isn't a language name: it passes the instruction through, so
+    /// the model — not Mila — decides, which is the only honest option now
+    /// that both offered languages are Latin script.
+    func test_outputLanguage_names_feed_the_prompt_token() {
+        XCTAssertEqual(LiveAISettings.OutputLanguage.auto.promptName,
+                       "the same language as the transcript below")
+        XCTAssertEqual(LiveAISettings.OutputLanguage.swedish.promptName, "Swedish")
+        XCTAssertEqual(LiveAISettings.OutputLanguage.english.promptName, "English")
+
+        XCTAssertEqual(LiveAISettings.OutputLanguage.allCases.map(\.displayName),
+                       ["Auto", "English", "Swedish"])
     }
 }

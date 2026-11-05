@@ -132,4 +132,37 @@ final class LiveAISettingsMigrationTests: XCTestCase {
         let settings = LiveAISettings(defaults: defaults)
         XCTAssertEqual(settings.summaryPrompt, LiveAISettings.defaultSummaryPrompt)
     }
+
+    /// The English "thorough" default shipped until the Swedish one. It is a
+    /// stock value, not a user's text, so it migrates — the difference from a
+    /// customised prompt is exactly what the exact-match test guards.
+    func test_summaryPrompt_english_default_migrates_to_swedish_default() {
+        defaults.set(LiveAISettings.legacySummaryPromptV2, forKey: "liveAI.summaryPrompt")
+        let settings = LiveAISettings(defaults: defaults)
+        XCTAssertEqual(settings.summaryPrompt, LiveAISettings.defaultSummaryPrompt,
+                       "the shipped English default must follow the app's language")
+    }
+
+    // MARK: - prompt (Live AI ticks)
+
+    func test_prompt_unset_uses_swedish_default() {
+        let settings = LiveAISettings(defaults: defaults)
+        XCTAssertEqual(settings.prompt, LiveAISettings.defaultPrompt)
+    }
+
+    func test_prompt_legacy_english_default_migrates_to_swedish_default() {
+        defaults.set(LiveAISettings.legacyPromptV1, forKey: "liveAI.prompt")
+        let settings = LiveAISettings(defaults: defaults)
+        XCTAssertEqual(settings.prompt, LiveAISettings.defaultPrompt)
+    }
+
+    /// The shipped defaults are Swedish now, so the English ones are only ever
+    /// reached as legacy constants — and a user who wrote their own prompt (in
+    /// any language) must keep it untouched.
+    func test_prompt_custom_value_is_preserved() {
+        let custom = "Sammanfatta varje gång jag blir tilltalad."
+        defaults.set(custom, forKey: "liveAI.prompt")
+        let settings = LiveAISettings(defaults: defaults)
+        XCTAssertEqual(settings.prompt, custom)
+    }
 }

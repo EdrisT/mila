@@ -1,4 +1,5 @@
 import XCTest
+import TranscriptionCore
 @testable import Mila
 
 /// Tests for the post-record summarizer that runs whenever the LLM CLI
@@ -86,26 +87,7 @@ final class RecordingSummarizerTests: XCTestCase {
         XCTAssertTrue(summarizer.shouldSummarize(rec))
     }
 
-    /// The auto-summary master switch. When the user turns off
-    /// "Automatically summarize recordings" the post-recording summary
-    /// must NOT fire, even with the LLM configured and a transcript ready.
-    func test_should_summarize_false_when_auto_summary_disabled() {
-        llm.tool = .claude
-        llm.summaryEnabled = false
-        let rec = Recording(title: "T", source: .microphone, audioFileName: "t.wav",
-                            fullText: "the transcript")
-        XCTAssertFalse(summarizer.shouldSummarize(rec),
-                       "Disabling auto-summary must gate shouldSummarize")
-    }
 
-    /// Default-on: existing users (and fresh installs) keep getting
-    /// summaries unless they explicitly opt out. A bare `defaults.bool`
-    /// would default to false and silently disable the feature for
-    /// everyone, so the property must default to true.
-    func test_summary_enabled_defaults_true() {
-        XCTAssertTrue(llm.summaryEnabled,
-                      "Auto-summary must default to on to preserve existing behaviour")
-    }
 
     func test_should_summarize_treats_whitespace_summary_as_empty() {
         llm.tool = .claude
@@ -275,68 +257,7 @@ final class RecordingSummarizerTests: XCTestCase {
                        "Late-arriving CLI output must not overwrite a summary that already exists")
     }
 
-    /// End-to-end: with auto-summary disabled, a freshly transcribed
-    /// recording must be left untouched — the runner is never invoked and no
-    /// summary lands.
-    func test_summarize_skips_when_auto_summary_disabled() async throws {
-        llm.tool = .claude
-        llm.summaryEnabled = false
-        var called = false
-        useStubRunner { _, _, _, _, _, _, _, _, _, _, _ in
-            called = true
-            return "SHOULD NOT RUN"
-        }
 
-        let audioURL = store.freshAudioURL(suggestedName: "Off")
-        try Data("x".utf8).write(to: audioURL)
-        let rec = Recording(
-            title: "Off",
-            source: .microphone,
-            audioFileName: audioURL.lastPathComponent,
-            fullText: "transcript text"
-        )
-        store.add(rec)
-
-        summarizer.summarizeIfNeeded(rec)
-        // The auto-summary gate is synchronous: a disabled toggle means
-        // `runSummary` is never reached, so no CLI task is ever spawned.
-        XCTAssertFalse(summarizer.isSummarizing(rec.id),
-                       "Disabled auto-summary must not spawn a CLI task")
-        await summarizer.awaitInFlight(rec.id)
-        XCTAssertFalse(called, "the runner must not be invoked while auto-summary is disabled")
-        let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
-        XCTAssertNil(updated.summary,
-                     "No summary should be written while auto-summary is disabled")
-    }
-
-    /// The explicit "Regenerate summary" affordance is a deliberate user
-    /// action and must work even when AUTOMATIC summaries are turned off —
-    /// the toggle governs the post-recording auto path, not on-demand use.
-    func test_regenerate_works_even_when_auto_summary_disabled() async throws {
-        llm.tool = .claude
-        llm.summaryEnabled = false
-        useStubRunner { _, _, _, _, _, _, _, _, _, _, _ in "ON DEMAND" }
-
-        let audioURL = store.freshAudioURL(suggestedName: "Manual")
-        try Data("x".utf8).write(to: audioURL)
-        var rec = Recording(
-            title: "Manual",
-            source: .microphone,
-            audioFileName: audioURL.lastPathComponent,
-            fullText: "transcript text"
-        )
-        // Mirrors the real UI path: the "Regenerate summary" action is only
-        // reachable on a recording that already has a summary (e.g. made
-        // before the user disabled auto-summary). Regenerate must still
-        // refresh it on demand despite the master switch being off.
-        rec.summary = "stale summary from before auto-summary was disabled"
-        store.add(rec)
-
-        summarizer.regenerate(rec)
-        await summarizer.awaitInFlight(rec.id)
-        let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
-        XCTAssertEqual(updated.summary, "ON DEMAND")
-    }
 
     // MARK: - Force / regenerate path
 
@@ -1126,26 +1047,41 @@ final class RecordingSummarizerTests: XCTestCase {
 
     /// The resolution order, pinned without a store or a runner: a
     /// recording's own override wins; otherwise the global setting; and the
-    /// global `.auto` is decided from the transcript text.
+    /// global `.auto` hands "the same language as the transcript below" to the
+    /// model instead of Mila picking one language itself — with Swedish as the
+    /// other language there is no script difference left to detect, so a guess
+    /// here would have been a silent coin flip.
     func test_prompt_language_resolution_order() {
         var english = Recording(title: "T", source: .microphone, audioFileName: "t.wav",
                                 fullText: "we discussed the roadmap")
-        var hebrew = Recording(title: "T", source: .microphone, audioFileName: "t.wav",
-                               fullText: "דיברנו על מפת הדרכים")
+        var swedish = Recording(title: "T", source: .microphone, audioFileName: "t.wav",
+                                fullText: "vi diskuterade roadmapen")
 
-        // No override: the global decides. Auto reads the text.
-        XCTAssertEqual(RecordingSummarizer.promptLanguageName(for: english, global: .auto), "English")
-        XCTAssertEqual(RecordingSummarizer.promptLanguageName(for: hebrew, global: .auto), "Hebrew")
-        XCTAssertEqual(RecordingSummarizer.promptLanguageName(for: hebrew, global: .english), "English")
-        XCTAssertEqual(RecordingSummarizer.promptLanguageName(for: english, global: .hebrew), "Hebrew")
+        // No override: the global decides. Auto is passed through verbatim,
+        // for BOTH transcripts — it does not read the text any more.
+        XCTAssertEqual(RecordingSummarizer.promptLanguageName(for: english, global: .auto),
+                       "the same language as the transcript below")
+        XCTAssertEqual(RecordingSummarizer.promptLanguageName(for: swedish, global: .auto),
+                       "the same language as the transcript below")
+        XCTAssertEqual(RecordingSummarizer.promptLanguageName(for: swedish, global: .english), "English")
+        XCTAssertEqual(RecordingSummarizer.promptLanguageName(for: english, global: .swedish), "Swedish")
 
-        // An override beats every global value, including Auto's reading.
-        english.summaryLanguage = "he"
-        hebrew.summaryLanguage = "en"
-        XCTAssertEqual(RecordingSummarizer.promptLanguageName(for: english, global: .english), "Hebrew")
-        XCTAssertEqual(RecordingSummarizer.promptLanguageName(for: english, global: .auto), "Hebrew")
-        XCTAssertEqual(RecordingSummarizer.promptLanguageName(for: hebrew, global: .hebrew), "English")
-        XCTAssertEqual(RecordingSummarizer.promptLanguageName(for: hebrew, global: .auto), "English")
+        // An override beats every global value, including Auto's phrasing.
+        english.summaryLanguage = "sv"
+        swedish.summaryLanguage = "en"
+        XCTAssertEqual(RecordingSummarizer.promptLanguageName(for: english, global: .english), "Swedish")
+        XCTAssertEqual(RecordingSummarizer.promptLanguageName(for: english, global: .auto), "Swedish")
+        XCTAssertEqual(RecordingSummarizer.promptLanguageName(for: swedish, global: .swedish), "English")
+        XCTAssertEqual(RecordingSummarizer.promptLanguageName(for: swedish, global: .auto), "English")
+
+        // A `"he"` left on a recording made before Hebrew was dropped is not
+        // an override at all (`Recording.summaryLanguageOverride` decodes
+        // strictly), so the global setting applies unchanged.
+        var legacy = Recording(title: "T", source: .microphone, audioFileName: "t.wav",
+                               fullText: "דיברנו על מפת הדרכים", summaryLanguage: "he")
+        XCTAssertEqual(RecordingSummarizer.promptLanguageName(for: legacy, global: .swedish), "Swedish")
+        legacy.summaryLanguage = "en"
+        XCTAssertEqual(RecordingSummarizer.promptLanguageName(for: legacy, global: .swedish), "English")
     }
 
     /// End-to-end: the override reaches the model. Same transcript, same
@@ -1155,6 +1091,10 @@ final class RecordingSummarizerTests: XCTestCase {
     func test_summarize_per_recording_override_wins_over_global() async throws {
         llm.tool = .claude
         liveAI.outputLanguage = .english
+        // The token is now the ONLY channel for the language — Mila appends no
+        // directive of its own — so the test prompt makes the substitution
+        // visible without depending on the shipped default's wording.
+        liveAI.summaryPrompt = "LANG={{LANGUAGE}}"
         var prompts: [UUID: String] = [:]
         useStubRunner { _, prompt, transcript, _, _, _, _, _, _, _, _ in
             // Key by transcript so the two runs can be told apart.
@@ -1166,7 +1106,7 @@ final class RecordingSummarizerTests: XCTestCase {
         // the prompt under the right recording without peeking at state.
         var withOverride = try addRecording(named: "Override", text: "")
         withOverride.fullText = withOverride.id.uuidString
-        withOverride.summaryLanguage = "he"
+        withOverride.summaryLanguage = "sv"
         store.update(withOverride)
         var without = try addRecording(named: "Default", text: "")
         without.fullText = without.id.uuidString
@@ -1179,18 +1119,20 @@ final class RecordingSummarizerTests: XCTestCase {
 
         let overridden = try XCTUnwrap(prompts[withOverride.id])
         let defaulted = try XCTUnwrap(prompts[without.id])
-        XCTAssertTrue(overridden.contains(RecordingSummarizer.languageDirective("Hebrew")),
-                      "the override must name Hebrew; got \(overridden.suffix(200))")
-        XCTAssertFalse(overridden.contains("English"),
+        XCTAssertTrue(overridden.contains("LANG=Swedish"),
+                      "the override must name Swedish; got \(overridden.prefix(200))")
+        XCTAssertFalse(overridden.contains("LANG=English"),
                        "nothing in the prompt may still ask for the global language")
-        XCTAssertTrue(defaulted.contains(RecordingSummarizer.languageDirective("English")),
+        XCTAssertTrue(defaulted.contains("LANG=English"),
                       "control: without an override the global setting applies")
     }
 
-    /// Today's behaviour, pinned: with no override, global Auto follows the
-    /// transcript text and a literal global value is used as-is.
+    /// Today's behaviour, pinned: with no override, a literal global value is
+    /// used as-is, and global Auto passes "the same language as the transcript
+    /// below" through to the model — for every transcript, Hebrew-script or not.
     func test_summarize_without_override_follows_global_setting() async throws {
         llm.tool = .claude
+        liveAI.summaryPrompt = "LANG={{LANGUAGE}}"
         var lastPrompt = ""
         useStubRunner { _, prompt, _, _, _, _, _, _, _, _, _ in
             lastPrompt = prompt
@@ -1201,54 +1143,64 @@ final class RecordingSummarizerTests: XCTestCase {
         let hebrewText = try addRecording(named: "Auto-he", text: "דיברנו על מפת הדרכים והסכמנו")
         summarizer.summarizeIfNeeded(hebrewText)
         await summarizer.awaitInFlight(hebrewText.id)
-        XCTAssertTrue(lastPrompt.contains(RecordingSummarizer.languageDirective("Hebrew")))
+        XCTAssertTrue(lastPrompt.contains(
+                        "LANG=the same language as the transcript below"),
+                      "Auto is the model's call now, not Mila's; got \(lastPrompt.prefix(200))")
 
         let englishText = try addRecording(named: "Auto-en", text: "we discussed the roadmap")
         summarizer.summarizeIfNeeded(englishText)
         await summarizer.awaitInFlight(englishText.id)
-        XCTAssertTrue(lastPrompt.contains(RecordingSummarizer.languageDirective("English")))
+        XCTAssertTrue(lastPrompt.contains(
+                        "LANG=the same language as the transcript below"),
+                      "same phrasing for a Latin-script transcript — the text is not inspected")
 
-        liveAI.outputLanguage = .hebrew
-        let forcedHebrew = try addRecording(named: "Global-he", text: "we discussed the roadmap")
-        summarizer.summarizeIfNeeded(forcedHebrew)
-        await summarizer.awaitInFlight(forcedHebrew.id)
-        XCTAssertTrue(lastPrompt.contains(RecordingSummarizer.languageDirective("Hebrew")),
+        liveAI.outputLanguage = .swedish
+        let forcedSwedish = try addRecording(named: "Global-sv", text: "we discussed the roadmap")
+        summarizer.summarizeIfNeeded(forcedSwedish)
+        await summarizer.awaitInFlight(forcedSwedish.id)
+        XCTAssertTrue(lastPrompt.contains("LANG=Swedish"),
                       "a literal global value applies regardless of the transcript's language")
     }
 
     /// recordings.json is user-editable on disk. A code the app does not know
-    /// must fall back to the global setting — NOT to Hebrew, which is what
+    /// must fall back to the global setting — NOT to Swedish, which is what
     /// `RecordingLanguage.fromCode` would have done
-    /// (`bugbot-rules/untrusted-persisted-data.md`).
+    /// (`bugbot-rules/untrusted-persisted-data.md`). Includes a `"he"` left by
+    /// a build that still offered Hebrew.
     func test_summarize_ignores_an_unknown_persisted_summary_language() async throws {
         llm.tool = .claude
         liveAI.outputLanguage = .english
+        liveAI.summaryPrompt = "LANG={{LANGUAGE}}"
         var lastPrompt = ""
         useStubRunner { _, prompt, _, _, _, _, _, _, _, _, _ in
             lastPrompt = prompt
             return "ok"
         }
 
-        var rec = try addRecording(named: "Unknown", text: "we discussed the roadmap")
-        rec.summaryLanguage = "fr"
-        store.update(rec)
-        XCTAssertNil(rec.summaryLanguageOverride, "an unknown code is not an override")
+        for retired in ["fr", "he"] {
+            var rec = try addRecording(named: "Unknown-\(retired)", text: "we discussed the roadmap")
+            rec.summaryLanguage = retired
+            store.update(rec)
+            XCTAssertNil(rec.summaryLanguageOverride, "`\(retired)` is not an override")
 
-        summarizer.summarizeIfNeeded(rec)
-        await summarizer.awaitInFlight(rec.id)
-        XCTAssertTrue(lastPrompt.contains(RecordingSummarizer.languageDirective("English")),
-                      "unknown code must defer to the global setting; got \(lastPrompt.suffix(200))")
-        XCTAssertFalse(lastPrompt.contains("Hebrew"))
+            summarizer.summarizeIfNeeded(rec)
+            await summarizer.awaitInFlight(rec.id)
+            XCTAssertTrue(lastPrompt.contains("LANG=English"),
+                          "unknown code must defer to the global setting; got \(lastPrompt.prefix(200))")
+            XCTAssertFalse(lastPrompt.contains("LANG=Swedish"))
+        }
     }
 
-    /// The language used to reach the model ONLY through the `{{LANGUAGE}}`
-    /// slot in the user-editable summary prompt, so a user who deleted the
-    /// slot got a silent no-op from the setting. The directive Mila appends
-    /// is what makes the override reliable for such a prompt.
-    func test_summarize_language_directive_survives_a_custom_prompt_without_the_placeholder() async throws {
+    /// The mirror image of what used to be pinned here. The language now reaches
+    /// the model ONLY through the `{{LANGUAGE}}` slot, so a prompt with no slot
+    /// gets NO language from Mila — not a directive appended behind its back.
+    /// That is the deliberate trade-off of making the whole prompt editable: the
+    /// setting stops being a override the user cannot see, and the Settings
+    /// caption says so.
+    func test_a_custom_prompt_without_the_language_token_gets_no_language_from_mila() async throws {
         llm.tool = .claude
         liveAI.outputLanguage = .english
-        liveAI.summaryPrompt = "Summarize this meeting in three bullet points."
+        liveAI.summaryPrompt = "Sammanfatta mötet på svenska."
         var lastPrompt = ""
         useStubRunner { _, prompt, _, _, _, _, _, _, _, _, _ in
             lastPrompt = prompt
@@ -1256,42 +1208,19 @@ final class RecordingSummarizerTests: XCTestCase {
         }
 
         var rec = try addRecording(named: "Custom", text: "we discussed the roadmap")
-        rec.summaryLanguage = "he"
+        rec.summaryLanguage = "sv"
         store.update(rec)
 
         summarizer.summarizeIfNeeded(rec)
         await summarizer.awaitInFlight(rec.id)
-        XCTAssertTrue(lastPrompt.hasPrefix("Summarize this meeting in three bullet points."),
-                      "the user's prompt still leads the request")
-        XCTAssertTrue(lastPrompt.contains(RecordingSummarizer.languageDirective("Hebrew")),
-                      "the appended directive carries the language even with no placeholder")
+        XCTAssertEqual(lastPrompt.prefix("Sammanfatta mötet på svenska.".count),
+                       "Sammanfatta mötet på svenska.",
+                       "the user's prompt leads the request and nothing is prepended")
+        XCTAssertFalse(lastPrompt.contains("English"),
+                       "Mila must not state a language anywhere: \(lastPrompt)")
         XCTAssertFalse(lastPrompt.contains("{{LANGUAGE}}"))
     }
 
-    /// The launch / config-flip backfill sweep goes through the same
-    /// `runSummary`, so a recording that carries an override but never got a
-    /// summary is summarized in ITS language, not the global one.
-    func test_backfill_honours_per_recording_override() async throws {
-        llm.tool = .claude
-        liveAI.outputLanguage = .english
-        var lastPrompt = ""
-        useStubRunner { _, prompt, _, _, _, _, _, _, _, _, _ in
-            lastPrompt = prompt
-            return "BACKFILLED"
-        }
-
-        var rec = try addRecording(named: "Backfill", text: "we discussed the roadmap")
-        rec.status = .completed   // backfill only looks at completed rows
-        rec.summaryLanguage = "he"
-        store.update(rec)
-
-        summarizer.backfillIfNeeded()
-        await summarizer.awaitInFlight(rec.id)
-
-        let updated = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
-        XCTAssertEqual(updated.summary, "BACKFILLED")
-        XCTAssertTrue(lastPrompt.contains(RecordingSummarizer.languageDirective("Hebrew")))
-    }
 
     /// Picking a language while a summary is already in flight. The language
     /// was resolved when the run started, so, left alone, the override would
@@ -1303,6 +1232,7 @@ final class RecordingSummarizerTests: XCTestCase {
     func test_summarize_reruns_when_the_summary_language_changes_mid_flight() async throws {
         llm.tool = .claude
         liveAI.outputLanguage = .english
+        liveAI.summaryPrompt = "LANG={{LANGUAGE}}"
         let gate = TestGate()
         var prompts: [String] = []
         useStubRunner { _, prompt, _, _, _, _, _, _, _, _, _ in
@@ -1321,8 +1251,8 @@ final class RecordingSummarizerTests: XCTestCase {
         // What the menu does: `setSummaryLanguage` writes the override on
         // the live row, then asks for a regenerate — which the dedup guard
         // drops.
-        summarizer.setSummaryLanguage(.hebrew, for: rec.id)
-        XCTAssertEqual(store.recordings.first { $0.id == rec.id }?.summaryLanguage, "he",
+        summarizer.setSummaryLanguage(.swedish, for: rec.id)
+        XCTAssertEqual(store.recordings.first { $0.id == rec.id }?.summaryLanguage, "sv",
                        "the override is persisted even while the stale run is still out")
         gate.open()
         await summarizer.awaitInFlight(rec.id)
@@ -1336,26 +1266,31 @@ final class RecordingSummarizerTests: XCTestCase {
         await summarizer.awaitInFlight(rec.id)
 
         XCTAssertEqual(prompts.count, 2, "exactly one re-run")
-        XCTAssertTrue(prompts[0].contains(RecordingSummarizer.languageDirective("English")))
-        XCTAssertTrue(prompts[1].contains(RecordingSummarizer.languageDirective("Hebrew")),
+        XCTAssertTrue(prompts[0].contains("LANG=English"))
+        XCTAssertTrue(prompts[1].contains("LANG=Swedish"),
                       "the re-run must use the language the user just picked")
         let final = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertEqual(final.summary, "SECOND",
                        "the stale-language output must never be stored")
-        XCTAssertEqual(final.summaryLanguage, "he")
+        XCTAssertEqual(final.summaryLanguage, "sv")
     }
 
     /// The mid-flight replay must not depend on the interrupted call
     /// succeeding: a pick made while a run is out is a user action, and it
     /// gets its one re-run whether that run stored a summary, parsed nothing
     /// or failed. Before this, only the success path compared the language,
-    /// so a timeout at the wrong moment left ✓ Hebrew on the menu and an
+    /// so a timeout at the wrong moment left ✓ Swedish on the menu and an
     /// English summary on the recording with nothing scheduled to fix it.
     /// (The empty-output path goes through the same helper.)
     func test_summarize_reruns_in_the_new_language_when_the_interrupted_call_fails() async throws {
         struct StubFailure: Error {}
         llm.tool = .claude
         liveAI.outputLanguage = .english
+        // Pin the prompt so the language the re-run used is observable in the
+        // text: the shipped default is Swedish prose with `{{LANGUAGE}}` buried
+        // in a sentence, which would make this assertion about prose, not about
+        // which language the switch produced.
+        liveAI.summaryPrompt = "LANG={{LANGUAGE}}"
         let gate = TestGate()
         var prompts: [String] = []
         useStubRunner { _, prompt, _, _, _, _, _, _, _, _, _ in
@@ -1370,18 +1305,18 @@ final class RecordingSummarizerTests: XCTestCase {
         let rec = try addRecording(named: "Race", text: "we discussed the roadmap")
         summarizer.summarizeIfNeeded(rec)
         XCTAssertTrue(summarizer.isSummarizing(rec.id))
-        summarizer.setSummaryLanguage(.hebrew, for: rec.id)
+        summarizer.setSummaryLanguage(.swedish, for: rec.id)
         gate.open()
         await summarizer.awaitInFlight(rec.id)
         await waitUntil { prompts.count == 2 }
         await summarizer.awaitInFlight(rec.id)
 
         XCTAssertEqual(prompts.count, 2, "exactly one re-run, even though the first call failed")
-        XCTAssertTrue(prompts[1].contains(RecordingSummarizer.languageDirective("Hebrew")),
+        XCTAssertTrue(prompts[1].contains("LANG=Swedish"),
                       "the re-run must use the language the user picked")
         let final = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
         XCTAssertEqual(final.summary, "SECOND")
-        XCTAssertEqual(final.summaryLanguage, "he")
+        XCTAssertEqual(final.summaryLanguage, "sv")
     }
 
     // MARK: - Regenerate while a run is in flight (#318)
@@ -1462,7 +1397,7 @@ final class RecordingSummarizerTests: XCTestCase {
             store.update(row)
             summarizer.regenerate(row)
         }
-        summarizer.setSummaryLanguage(.hebrew, for: rec.id)
+        summarizer.setSummaryLanguage(.swedish, for: rec.id)
         summarizer.summarizeIfNeeded(rec)
 
         gate.open()
@@ -1811,9 +1746,10 @@ final class RecordingSummarizerTests: XCTestCase {
         }
     }
 
-    /// Two completed recordings queued for backfill with ONE slot.
-    /// `store.add` inserts at the front and the backfill scans newest-first,
-    /// so the one added LAST starts first.
+    /// Two completed recordings, both without a summary, for the cancel tests:
+    /// one whose call gets cancelled and one that must survive it. `store.add`
+    /// inserts at the front, so the one added LAST is the one the tests start
+    /// first.
     private func addQueuedPair() throws -> (running: Recording, queued: Recording) {
         var queued = try addRecording(named: "Queued", text: "queued transcript")
         queued.status = .completed
@@ -1824,50 +1760,52 @@ final class RecordingSummarizerTests: XCTestCase {
         return (running, queued)
     }
 
-    /// Permanently deleting a recording whose summary is being generated
-    /// cancels that call, and the queued recording takes the freed slot.
-    /// Nothing used to call `cancel(recordingID:)`, so the deleted row's CLI
-    /// ran to completion holding the slot, and the queue waited behind it.
-    func test_permanently_deleting_a_recording_mid_summary_cancels_it_and_starts_the_next() async throws {
+    /// Permanently deleting a recording whose summary is being generated cancels
+    /// that call. Nothing else calls `cancel(recordingID:)`, so without the
+    /// store's `permanentlyDeleted` wiring the deleted row's provider call would
+    /// run to completion and store its output nowhere — and, worse, a row the
+    /// user threw away would keep costing money.
+    func test_permanently_deleting_a_recording_mid_summary_cancels_it() async throws {
         llm.tool = .claude
         var started: [String] = []
         useParkingRunner { started.append($0); return started.count }
-        summarizer.maxConcurrent = 1
         var finished: [UUID] = []
         summarizer.onSummaryFinished = { finished.append($0.id) }
 
         let (running, queued) = try addQueuedPair()
-        summarizer.backfillIfNeeded()
-        await waitUntil { started.count == 1 }
-        XCTAssertEqual(started, ["running transcript"])
+        summarizer.summarizeIfNeeded(running)
+        summarizer.summarizeIfNeeded(queued)
+        await waitUntil { started.count == 2 }
+        // `useParkingRunner` parks only the FIRST call, which is `running`'s —
+        // that is the one being cancelled. `queued`'s stub returns at once, so
+        // it is deliberately NOT asserted to be in flight here.
         XCTAssertTrue(summarizer.isSummarizing(running.id))
-        XCTAssertFalse(summarizer.isSummarizing(queued.id), "one slot: the second waits")
 
         store.permanentlyDelete(running)
         XCTAssertFalse(summarizer.isSummarizing(running.id),
                        "the delete must cancel the deleted row's summary")
 
-        await waitUntil { started.count == 2 }
-        XCTAssertEqual(started, ["running transcript", "queued transcript"],
-                       "the queued recording must start once the cancelled call has unwound")
         await summarizer.awaitInFlight(queued.id)
+        XCTAssertNil(store.recordings.first { $0.id == running.id },
+                     "the deleted row is gone")
         XCTAssertEqual(store.recordings.first { $0.id == queued.id }?.summary,
                        "SUMMARY of queued transcript")
         XCTAssertEqual(finished, [queued.id], "a deleted recording is never signalled")
     }
 
-    /// The same through "Empty Recently Deleted" — and moving a row to the
-    /// bin on its own does NOT cancel: that is reversible, and nothing
-    /// re-queues a restored row's summary, so the call is let finish.
+    /// The same through "Empty Recently Deleted" — and moving a row to the bin
+    /// on its own does NOT cancel: that is reversible, and the call is one the
+    /// user already asked for, so a restore finds it finished rather than
+    /// silently missing.
     func test_emptying_the_trash_cancels_a_trashed_rows_summary_but_trashing_does_not() async throws {
         llm.tool = .claude
         var started: [String] = []
         useParkingRunner { started.append($0); return started.count }
-        summarizer.maxConcurrent = 1
 
         let (running, queued) = try addQueuedPair()
-        summarizer.backfillIfNeeded()
-        await waitUntil { started.count == 1 }
+        summarizer.summarizeIfNeeded(running)
+        summarizer.summarizeIfNeeded(queued)
+        await waitUntil { started.count == 2 }
         XCTAssertTrue(summarizer.isSummarizing(running.id))
 
         store.softDelete(running)
@@ -1876,8 +1814,6 @@ final class RecordingSummarizerTests: XCTestCase {
 
         XCTAssertEqual(store.emptyTrash(), 1)
         XCTAssertFalse(summarizer.isSummarizing(running.id))
-        await waitUntil { started.count == 2 }
-        XCTAssertEqual(started, ["running transcript", "queued transcript"])
         await summarizer.awaitInFlight(queued.id)
         XCTAssertEqual(store.recordings.first { $0.id == queued.id }?.summary,
                        "SUMMARY of queued transcript")
@@ -1905,9 +1841,9 @@ final class RecordingSummarizerTests: XCTestCase {
         XCTAssertEqual(calls, 0, "a deleted recording must not cost an LLM call")
     }
 
-    /// A request that is SKIPPED (no call: auto-summary off, LLM not
-    /// configured, empty transcript) for a recording that was already
-    /// permanently deleted signals nothing. The skip paths used to signal
+    /// A request that is SKIPPED (no call: LLM not configured, empty
+    /// transcript) for a recording that was already permanently deleted signals
+    /// nothing. The skip paths used to signal
     /// with the caller's stale copy, so the completion hook ran for a row
     /// that no longer exists. A row still in the store keeps its signal.
     func test_a_skipped_request_for_a_deleted_recording_is_not_signalled() async throws {
@@ -1924,22 +1860,15 @@ final class RecordingSummarizerTests: XCTestCase {
         let kept = try addRecording(named: "Kept", text: "a transcript")
         store.permanentlyDelete(gone)
 
-        // summarizeIfNeeded's skip: auto-summary off.
-        llm.summaryEnabled = false
+        // summarizeIfNeeded's skip: no provider configured.
+        llm.tool = .none
         summarizer.summarizeIfNeeded(gone)
         summarizer.summarizeIfNeeded(kept)
         XCTAssertEqual(finished, [kept.id],
                        "summarizeIfNeeded's skip must not signal a deleted recording")
 
-        // regenerate's skips: LLM not configured, then an empty transcript.
-        finished = []
-        llm.summaryEnabled = true
-        llm.tool = .none
-        summarizer.regenerate(gone)
-        summarizer.regenerate(kept)
-        XCTAssertEqual(finished, [kept.id],
-                       "regenerate's not-configured skip must not signal a deleted recording")
-
+        // regenerate's skip: an empty transcript (regenerate ignores the
+        // configured gate only in that case, which is what it checks first).
         finished = []
         llm.tool = .claude
         var emptyGone = gone
@@ -1951,63 +1880,6 @@ final class RecordingSummarizerTests: XCTestCase {
         XCTAssertEqual(calls, 0)
     }
 
-    /// A cancelled run keeps its slot until its call has actually unwound —
-    /// in production, until `LLMRunner` has killed and reaped the child.
-    /// `cancel` drops the run from `inFlight` at once, so without that
-    /// accounting another run's completion would start new CLIs while the
-    /// cancelled one was still alive, briefly running more than
-    /// `maxConcurrent`. The stub for "a" ignores the cancel until its gate
-    /// opens, standing in for a child that takes a while to die.
-    func test_a_cancelled_run_holds_its_slot_until_it_unwinds() async throws {
-        llm.tool = .claude
-        let gateA = TestGate(), gateB = TestGate(), gateC = TestGate()
-        var started: [String] = []
-        useStubRunner { _, _, transcript, _, _, _, _, _, _, _, _ in
-            started.append(transcript)
-            switch transcript {
-            case "a": await gateA.wait(); throw CancellationError()
-            case "b": await gateB.wait()
-            case "c": await gateC.wait()
-            default: break
-            }
-            return "SUMMARY of \(transcript)"
-        }
-        summarizer.maxConcurrent = 2
-
-        // `add` inserts at the front and the scan is newest-first, so the
-        // queue order is a, b, c, d.
-        var rows: [String: Recording] = [:]
-        for name in ["d", "c", "b", "a"] {
-            var rec = try addRecording(named: name, text: name)
-            rec.status = .completed
-            store.update(rec)
-            rows[name] = rec
-        }
-        summarizer.backfillIfNeeded()
-        await waitUntil { started.count == 2 }
-        XCTAssertEqual(started, ["a", "b"])
-
-        store.permanentlyDelete(try XCTUnwrap(rows["a"]))
-        gateB.open()
-        await waitUntil { started.count == 3 }
-        XCTAssertEqual(started, ["a", "b", "c"],
-                       "b's slot goes to c")
-        // b has finished and c is running; a is still unwinding, so it
-        // still counts and d must wait. b's `defer` ran the pump in the job
-        // that started c, so a wrongly started d would already be in flight.
-        XCTAssertFalse(summarizer.isSummarizing(try XCTUnwrap(rows["d"]).id),
-                       "a cancelled run that has not unwound must still hold its slot")
-        XCTAssertEqual(started, ["a", "b", "c"])
-
-        gateA.open()
-        await waitUntil { started.count == 4 }
-        XCTAssertEqual(started, ["a", "b", "c", "d"],
-                       "the slot is handed on once the cancelled run unwinds")
-        gateC.open()
-        await summarizer.awaitInFlight(try XCTUnwrap(rows["c"]).id)
-        await summarizer.awaitInFlight(try XCTUnwrap(rows["d"]).id)
-        XCTAssertEqual(store.recordings.first { $0.id == rows["d"]?.id }?.summary, "SUMMARY of d")
-    }
 
     /// The other half of #318: when the row's FIRST summary finishes while a
     /// re-transcription is still running, the pass started with no summary,
@@ -2049,14 +1921,14 @@ final class RecordingSummarizerTests: XCTestCase {
         XCTAssertNil(live()?.summaryLanguage)
 
         // A real change persists and regenerates exactly once.
-        summarizer.setSummaryLanguage(.hebrew, for: rec.id)
-        XCTAssertEqual(live()?.summaryLanguage, "he")
+        summarizer.setSummaryLanguage(.swedish, for: rec.id)
+        XCTAssertEqual(live()?.summaryLanguage, "sv")
         await summarizer.awaitInFlight(rec.id)
         XCTAssertEqual(callCount, 1)
         XCTAssertEqual(live()?.summary, "SUMMARY 1")
 
         // Re-picking the language now in force is the no-op again.
-        summarizer.setSummaryLanguage(.hebrew, for: rec.id)
+        summarizer.setSummaryLanguage(.swedish, for: rec.id)
         XCTAssertFalse(summarizer.isSummarizing(rec.id))
         XCTAssertEqual(callCount, 1, "re-picking the ✓'d language must not regenerate")
         XCTAssertEqual(live()?.summary, "SUMMARY 1")
@@ -2083,7 +1955,7 @@ final class RecordingSummarizerTests: XCTestCase {
         XCTAssertEqual(callCount, 3)
 
         // An id that is not in the store is ignored outright.
-        summarizer.setSummaryLanguage(.hebrew, for: UUID())
+        summarizer.setSummaryLanguage(.swedish, for: UUID())
         XCTAssertEqual(callCount, 3)
     }
 
@@ -2092,6 +1964,300 @@ final class RecordingSummarizerTests: XCTestCase {
     /// Add a completed-looking recording with `text` as its transcript (the
     /// summarizer never reads the audio, but `RecordingStore.add` wants the
     /// file to exist).
+    // MARK: - The prompt IS the request: variables, transcript slot, speaker labels
+
+    /// The values Mila substitutes for the fields the user can see in Settings.
+    /// Dates are fixed-format in the device's own clock (`en_US_POSIX` shapes,
+    /// not locale-following text) because they land in a prompt and in an
+    /// Obsidian `[[YYYY-MM-DD]]` link, not on a screen.
+    func test_promptVariables_format_the_recording_itself() throws {
+        var rec = Recording(title: "Stämma", source: .microphone, audioFileName: "s.wav",
+                            fullText: "vi diskuterade roadmapen")
+        var components = DateComponents()
+        components.year = 2026; components.month = 3; components.day = 4
+        components.hour = 9; components.minute = 15
+        rec.createdAt = try XCTUnwrap(Calendar.current.date(from: components))
+        rec.duration = 3_720   // 1 h 2 min
+        rec.appName = "Zoom"
+        rec.language = "sv"
+        rec.segments = [TranscriptSegment(start: 0, end: 1, text: "vi", speaker: "SPEAKER_00"),
+                        TranscriptSegment(start: 1, end: 2, text: "diskuterade", speaker: "SPEAKER_01")]
+        rec.speakerNames = ["SPEAKER_00": "Anna"]
+
+        let values = RecordingSummarizer.promptValues(for: rec,
+                                                      languageName: "Swedish",
+                                                      transcript: "TRANSCRIPT")
+        XCTAssertEqual(values["LANGUAGE"], "Swedish")
+        XCTAssertEqual(values["TRANSCRIPT"], "TRANSCRIPT")
+        XCTAssertEqual(values["TITLE"], "Stämma")
+        XCTAssertEqual(values["DATE"], "2026-03-04")
+        XCTAssertEqual(values["TIME"], "09:15")
+        XCTAssertEqual(values["END_TIME"], "10:17")
+        XCTAssertEqual(values["DURATION"], "1 h 2 min")
+        XCTAssertEqual(values["SOURCE_APP"], "Zoom")
+        XCTAssertEqual(values["SPEAKERS"], "Anna, Talare B")
+    }
+
+    func test_durationText_stays_a_number_the_user_can_wrap_in_their_own_words() {
+        XCTAssertEqual(RecordingSummarizer.durationText(600), "10 min")
+        XCTAssertEqual(RecordingSummarizer.durationText(59), "1 min")
+        XCTAssertEqual(RecordingSummarizer.durationText(3_600), "1 h")
+        XCTAssertEqual(RecordingSummarizer.durationText(3_720), "1 h 2 min")
+        XCTAssertEqual(RecordingSummarizer.durationText(0), "0 min")
+    }
+
+    /// What the model is shown for each turn. A name the user assigned wins;
+    /// an unnamed voice gets the SAME fallback the transcript view shows
+    /// (`Talare B` in Swedish), not the diarizer's raw id — the old `fullText`
+    /// gave no labels at all, and plain `TranscriptFormatter.plainText` would
+    /// have handed the model `SPEAKER_00` to echo back.
+    func test_model_sees_speaker_names_and_not_speaker_ids() {
+        var rec = Recording(title: "Möte", source: .microphone, audioFileName: "m.wav",
+                            fullText: "Hej allihopa Hej Vidare")
+        rec.language = "sv"
+        rec.segments = [
+            TranscriptSegment(start: 0, end: 1, text: "Hej allihopa", speaker: "SPEAKER_00"),
+            TranscriptSegment(start: 1, end: 2, text: "Hej", speaker: "SPEAKER_01"),
+            TranscriptSegment(start: 2, end: 3, text: "Vidare", speaker: "SPEAKER_00"),
+        ]
+        rec.speakerNames = ["SPEAKER_00": "Anna"]
+
+        XCTAssertEqual(RecordingSummarizer.transcriptForLLM(for: rec),
+                       "Anna: Hej allihopa\nTalare B: Hej\nAnna: Vidare")
+    }
+
+    /// An English recording gets "Speaker A" — the label follows the recording's
+    /// transcription language, exactly as in the UI, because that is the
+    /// language the model is being asked to work in.
+    func test_unnamed_speaker_label_follows_the_recordings_language() {
+        var rec = Recording(title: "Meeting", source: .microphone, audioFileName: "m.wav",
+                            fullText: "hello there")
+        rec.language = "en"
+        rec.segments = [TranscriptSegment(start: 0, end: 1, text: "hello", speaker: "SPEAKER_00"),
+                        TranscriptSegment(start: 1, end: 2, text: "there", speaker: "SPEAKER_01")]
+        XCTAssertEqual(RecordingSummarizer.transcriptForLLM(for: rec),
+                       "Speaker A: hello\nSpeaker B: there")
+    }
+
+    /// Diarization off: no segment carries a speaker, so there is nobody to
+    /// label and the plain joined text is the transcript — same as before.
+    func test_transcript_without_speakers_falls_back_to_the_plain_text() {
+        let rec = Recording(title: "Memo", source: .voiceMemo, audioFileName: "v.m4a",
+                            fullText: "handlade bara om en grej")
+        XCTAssertEqual(RecordingSummarizer.transcriptForLLM(for: rec),
+                       "handlade bara om en grej")
+    }
+
+    /// `{{SPEAKERS}}` is the attendance-shaped variable: every voice that
+    /// produced audio, in the order they first speak, with the labels the
+    /// transcript lines already carry. `{{CALENDAR_ATTENDEES}}` cannot answer
+    /// who was IN the room — it is the event's invite list, response status
+    /// unread — so a prompt that wants presence needs this one instead.
+    func test_speakers_lists_every_voice_in_first_speech_order() {
+        var rec = Recording(title: "Möte", source: .meeting, audioFileName: "m.wav",
+                            fullText: "a b c d")
+        rec.language = "sv"
+        rec.speakerNames = ["SPEAKER_00": "Anna"]
+        rec.segments = [
+            TranscriptSegment(start: 0, end: 1, text: "a", speaker: "SPEAKER_01"),
+            TranscriptSegment(start: 1, end: 2, text: "b", speaker: "SPEAKER_00"),
+            TranscriptSegment(start: 2, end: 3, text: "c", speaker: "SPEAKER_01"),
+            TranscriptSegment(start: 3, end: 4, text: "d", speaker: "SPEAKER_02"),
+        ]
+
+        XCTAssertEqual(RecordingSummarizer.speakerList(for: rec), "Talare B, Anna, Talare C")
+    }
+
+    /// A name Mila knows for a voice that never speaks in THIS recording is not
+    /// evidence that person was there — the list is built from the segments, not
+    /// from `speakerNames`.
+    func test_speakers_omits_named_voices_that_never_spoke() {
+        var rec = Recording(title: "Möte", source: .meeting, audioFileName: "m.wav",
+                            fullText: "hej då")
+        rec.language = "en"
+        rec.speakerNames = ["SPEAKER_00": "Anna", "SPEAKER_09": "Elsa"]
+        rec.segments = [TranscriptSegment(start: 0, end: 1, text: "hej", speaker: "SPEAKER_00"),
+                        TranscriptSegment(start: 1, end: 2, text: "då", speaker: "SPEAKER_00")]
+
+        XCTAssertEqual(RecordingSummarizer.speakerList(for: rec), "Anna")
+    }
+
+    /// An unaccepted suggestion is a guess. It lives in
+    /// `speakerNameSuggestions`, which `displaySpeakerName` never reads, so it
+    /// cannot dress itself up as an attendee — only names the user accepted (or
+    /// typed, or that a voice profile confirmed) reach the list.
+    func test_speakers_omits_unaccepted_name_suggestions() {
+        var rec = Recording(title: "Möte", source: .meeting, audioFileName: "m.wav",
+                            fullText: "jag heter anna")
+        rec.language = "sv"
+        rec.speakerNameSuggestions = [SpeakerNameSuggestion(speaker: "SPEAKER_00", name: "Anna",
+                                                            evidence: "jag heter anna",
+                                                            origin: .transcript)]
+        rec.segments = [TranscriptSegment(start: 0, end: 1, text: "jag heter anna",
+                                          speaker: "SPEAKER_00")]
+
+        XCTAssertEqual(RecordingSummarizer.speakerList(for: rec), "Talare A",
+                      "a suggestion the user has not acted on is not a name")
+    }
+
+    /// Two diarizer ids can carry one name — a rename that gave both halves the
+    /// same name, or a split that left one unnamed while the other took a name
+    /// it shares. A reader counts people, so the name appears once.
+    func test_speakers_lists_a_shared_name_once() {
+        var rec = Recording(title: "Möte", source: .meeting, audioFileName: "m.wav",
+                            fullText: "a b")
+        rec.language = "sv"
+        rec.speakerNames = ["SPEAKER_00": "Anna", "SPEAKER_01": "Anna"]
+        rec.segments = [TranscriptSegment(start: 0, end: 1, text: "a", speaker: "SPEAKER_00"),
+                        TranscriptSegment(start: 1, end: 2, text: "b", speaker: "SPEAKER_01")]
+
+        XCTAssertEqual(RecordingSummarizer.speakerList(for: rec), "Anna")
+    }
+
+    /// Diarization off: no voice can be told apart, so the value is empty —
+    /// never "unknown", which a model would happily restate as a fact.
+    func test_speakers_is_empty_when_diarization_was_off() {
+        let rec = Recording(title: "Memo", source: .voiceMemo, audioFileName: "v.m4a",
+                            fullText: "handlade bara om en grej")
+        XCTAssertEqual(RecordingSummarizer.speakerList(for: rec), "")
+    }
+
+    /// `{{TRANSCRIPT}}` in the prompt: the transcript goes where the user put
+    /// it, and Mila appends nothing — paying for the transcript twice in every
+    /// summary call would be a quiet 2× cost on long meetings.
+    func test_transcript_token_places_the_transcript_and_mila_appends_nothing() async throws {
+        llm.tool = .claude
+        liveAI.summaryPrompt = "SAMMANFATTA: {{TRANSCRIPT}}"
+        var seenPrompt = ""
+        var seenTranscript: String?
+        useStubRunner { _, prompt, transcript, _, _, _, _, _, _, _, _ in
+            seenPrompt = prompt
+            seenTranscript = transcript
+            return "ok"
+        }
+
+        let rec = try addRecording(named: "Token", text: "vi diskuterade roadmapen")
+        summarizer.summarizeIfNeeded(rec)
+        await summarizer.awaitInFlight(rec.id)
+
+        XCTAssertTrue(seenPrompt.contains("SAMMANFATTA: vi diskuterade roadmapen"),
+                      "the transcript lands in the user's own slot; got \(seenPrompt)")
+        XCTAssertEqual(seenTranscript ?? "<nil>", "",
+                       "nothing appended — the prompt already carries the transcript")
+        XCTAssertFalse(seenPrompt.contains("Transcript:"))
+    }
+
+    /// The back-compat half: a prompt with no slot keeps today's envelope, so a
+    /// user who never heard of the variable loses nothing.
+    func test_prompt_without_the_token_still_gets_the_transcript_appended() async throws {
+        llm.tool = .claude
+        liveAI.summaryPrompt = "Sammanfatta mötet."
+        var seenTranscript = ""
+        useStubRunner { _, _, transcript, _, _, _, _, _, _, _, _ in
+            seenTranscript = transcript
+            return "ok"
+        }
+
+        let rec = try addRecording(named: "NoToken", text: "vi diskuterade roadmapen")
+        summarizer.summarizeIfNeeded(rec)
+        await summarizer.awaitInFlight(rec.id)
+
+        XCTAssertEqual(seenTranscript, "vi diskuterade roadmapen")
+    }
+
+    /// Nothing of Mila's own is stitched onto the request any more: no
+    /// action-items contract, no language directive, no calendar block. Every
+    /// one of them was English text a Swedish user could not edit, translate
+    /// or remove, appended below a prompt they had written themselves.
+    func test_the_summarizer_adds_no_text_of_its_own_to_the_prompt() async throws {
+        llm.tool = .claude
+        liveAI.summaryPrompt = "Sammanfatta mötet."
+        var seenPrompt = ""
+        useStubRunner { _, prompt, _, _, _, _, _, _, _, _, _ in
+            seenPrompt = prompt
+            return "ok"
+        }
+
+        let rec = try addRecording(named: "Clean", text: "vi diskuterade roadmapen")
+        summarizer.summarizeIfNeeded(rec)
+        await summarizer.awaitInFlight(rec.id)
+
+        XCTAssertEqual(seenPrompt, "Sammanfatta mötet.",
+                       "the prompt the model sees is the prompt the user wrote")
+        for phrase in ["After the summary, list the action items",
+                       RecordingSummarizer.actionItemsSentinel,
+                       "Write the summary and every action item",
+                       "BACKGROUND"] {
+            XCTAssertFalse(seenPrompt.contains(phrase), "\(phrase) must not be injected")
+        }
+    }
+
+    /// A token Mila does not offer is left exactly as typed. Deleting it would
+    /// silently rewrite the user's prompt; a literal `{{MEETING_NAME}}` in the
+    /// output is visible in the one place they can act on it.
+    func test_an_unknown_token_is_left_verbatim() async throws {
+        llm.tool = .claude
+        liveAI.summaryPrompt = "Rubrik: {{MEETING_NAME}} — {{LANGUAGE}}"
+        var seenPrompt = ""
+        useStubRunner { _, prompt, _, _, _, _, _, _, _, _, _ in
+            seenPrompt = prompt
+            return "ok"
+        }
+
+        let rec = try addRecording(named: "Unknown", text: "vi diskuterade roadmapen")
+        summarizer.summarizeIfNeeded(rec)
+        await summarizer.awaitInFlight(rec.id)
+
+        XCTAssertTrue(seenPrompt.contains("{{MEETING_NAME}}"), "unknown token survives verbatim")
+        XCTAssertFalse(seenPrompt.contains("{{LANGUAGE}}"), "known tokens are substituted")
+    }
+
+    /// Naming a voice while a summary call is out changes the transcript the
+    /// call was built from, so its output is stale in a new way: it cannot say
+    /// who said anything. The completion compares the RENDERED transcript, so
+    /// the rename gets its re-run (the pre-render comparison of `fullText` was
+    /// blind to it).
+    func test_naming_a_speaker_mid_flight_discards_the_unlabelled_output() async throws {
+        llm.tool = .claude
+        let gate = TestGate()
+        var prompts: [String] = []
+        useStubRunner { _, prompt, _, _, _, _, _, _, _, _, _ in
+            prompts.append(prompt)
+            if prompts.count == 1 {
+                await gate.wait()
+                return "FIRST (no names)"
+            }
+            return "SECOND"
+        }
+
+        var rec = try addRecording(named: "Rename race", text: "Hej allihopa Hej")
+        // The unnamed label follows the recording's language (`SpeakerLabel`:
+        // "Speaker A" in English, "Talare A" in Swedish). Pin English so the two
+        // assertions below are about the RENAME race, not about which language
+        // the transcript renders in — that part has its own test
+        // (`test_unnamed_speaker_label_follows_the_recordings_language`).
+        rec.language = "en"
+        rec.segments = [TranscriptSegment(start: 0, end: 1, text: "Hej allihopa", speaker: "SPEAKER_00"),
+                        TranscriptSegment(start: 1, end: 2, text: "Hej", speaker: "SPEAKER_01")]
+        store.update(rec)
+
+        summarizer.summarizeIfNeeded(rec)
+        XCTAssertTrue(summarizer.isSummarizing(rec.id))
+
+        var renamed = rec
+        renamed.speakerNames = ["SPEAKER_00": "Anna"]
+        store.update(renamed)
+        gate.open()
+        await waitUntil { prompts.count == 2 }
+        await summarizer.awaitInFlight(rec.id)
+
+        XCTAssertEqual(prompts.count, 2, "the rename re-runs the summary")
+        XCTAssertTrue(prompts[0].contains("Speaker A:"), "the first run had no assigned names")
+        XCTAssertTrue(prompts[1].contains("Anna:"), "the re-run shows the name the user just gave")
+        let final = try XCTUnwrap(store.recordings.first { $0.id == rec.id })
+        XCTAssertEqual(final.summary, "SECOND")
+    }
+
     private func addRecording(named name: String, text: String) throws -> Recording {
         let audioURL = store.freshAudioURL(suggestedName: name)
         try Data("x".utf8).write(to: audioURL)

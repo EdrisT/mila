@@ -116,12 +116,12 @@ final class ManagedSettingsParsingTests: XCTestCase {
             "transcription.backend": "remote",
             "remote.endpoint": "https://asr.example.com/v1",
             "remote.model.en": "",
-            "recording.language": "he",
+            "recording.language": "sv",
         ]))
         XCTAssertEqual(managed.backend, .remote)
         XCTAssertEqual(managed.endpoint, "https://asr.example.com/v1")
         XCTAssertEqual(managed.englishModel, "")
-        XCTAssertEqual(managed.recordingLanguage, .hebrew)
+        XCTAssertEqual(managed.recordingLanguage, .swedish)
         XCTAssertTrue(ignored.isEmpty)
 
         let (bogus, bogusIgnored) = ManagedSettings.parse(FakeManagedPreferences(forced: [
@@ -169,17 +169,21 @@ final class ManagedSettingsParsingTests: XCTestCase {
         XCTAssertEqual(managed.liveAIModel, "nested")
     }
 
-    /// `RecordingLanguage.fromCode` reads anything unknown as Hebrew — fine for
-    /// legacy recordings, wrong for a lock: a typo would pin everyone to Hebrew.
+    /// `RecordingLanguage.fromCode` reads anything unknown as Swedish — fine for
+    /// legacy recordings, wrong for a lock: a typo would pin everyone to Swedish.
     func test_recordingLanguage_isValidatedStrictly() {
         XCTAssertEqual(ManagedSettings.strictLanguage("en"), .english)
         XCTAssertEqual(ManagedSettings.strictLanguage("en-US"), .english)
         XCTAssertEqual(ManagedSettings.strictLanguage(" EN "), .english)
-        XCTAssertEqual(ManagedSettings.strictLanguage("he_IL"), .hebrew)
-        XCTAssertEqual(ManagedSettings.strictLanguage("iw"), .hebrew)
+        XCTAssertEqual(ManagedSettings.strictLanguage("sv"), .swedish)
+        XCTAssertEqual(ManagedSettings.strictLanguage("sv_SE"), .swedish)
+        XCTAssertEqual(ManagedSettings.strictLanguage("sv-SE"), .swedish)
         XCTAssertNil(ManagedSettings.strictLanguage("auto"))
         XCTAssertNil(ManagedSettings.strictLanguage("enochian"))
         XCTAssertNil(ManagedSettings.strictLanguage("eng"))
+        XCTAssertNil(ManagedSettings.strictLanguage("he"),
+                     "Hebrew is no longer a language Mila offers, so a profile cannot lock it either")
+        XCTAssertNil(ManagedSettings.strictLanguage("iw"))
         XCTAssertNil(ManagedSettings.strictLanguage(""))
 
         let (managed, ignored) = ManagedSettings.parse(FakeManagedPreferences(forced: [
@@ -414,6 +418,11 @@ final class ManagedSettingsEnforcementTests: XCTestCase {
         // The user's own configuration, from before the profile arrived.
         do {
             let user = RemoteTranscriptionSettings(defaults: defaults, apiKeyKeychainKey: keychainKey)
+            // Persist a backend explicitly: the assertion below ("removing the
+            // profile restores what the user had" → `.local`) only means
+            // something if the user actually chose local. Left unset, this fork's
+            // remote default would answer instead of the user's choice.
+            user.backend = .local
             user.endpoint = "https://user.example.com/v1"
             user.model = "user-model"
         }
@@ -483,7 +492,12 @@ final class ManagedSettingsEnforcementTests: XCTestCase {
 
         var managed = ManagedSettings.empty
         managed.lockedWithoutValue = [.apiKey]
-        let remote = RemoteTranscriptionSettings(defaults: freshDefaults(#function),
+        // Pin the baseline to local: this fork's default backend is remote, and a
+        // remote start would load the token in `init` — which is exactly the
+        // lazy-while-local behaviour this test is checking.
+        let defaults = freshDefaults(#function)
+        defaults.set(TranscriptionBackend.local.rawValue, forKey: "transcription.backend")
+        let remote = RemoteTranscriptionSettings(defaults: defaults,
                                                  apiKeyKeychainKey: keychainKey,
                                                  managed: managed)
         XCTAssertEqual(remote.apiKey, "", "Still lazy: no Keychain read while local")
@@ -594,7 +608,7 @@ final class ManagedSettingsEnforcementTests: XCTestCase {
 
     func test_language_forced_userChoiceSurvivesUnderneath() {
         let defaults = freshDefaults(#function)
-        defaults.set("he", forKey: "recording.language")
+        defaults.set("sv", forKey: "recording.language")
         var managed = ManagedSettings.empty
         managed.recordingLanguage = .english
 
@@ -602,10 +616,10 @@ final class ManagedSettingsEnforcementTests: XCTestCase {
         XCTAssertTrue(language.isManaged(.recordingLanguage))
         XCTAssertEqual(language.current, .english)
 
-        language.current = .hebrew
+        language.current = .swedish
         XCTAssertEqual(language.current, .english)
-        XCTAssertEqual(defaults.string(forKey: "recording.language"), "he")
-        XCTAssertEqual(RecordingLanguageSettings(defaults: defaults).current, .hebrew,
+        XCTAssertEqual(defaults.string(forKey: "recording.language"), "sv")
+        XCTAssertEqual(RecordingLanguageSettings(defaults: defaults).current, .swedish,
                        "Without the profile the user's own choice comes back")
     }
 }
@@ -647,7 +661,7 @@ final class ManagedSettingsMilaConfigPrecedenceTests: XCTestCase {
         m.backend = .remote
         m.endpoint = "https://org.example.com/v1"
         m.apiKey = "org-token"
-        m.recordingLanguage = .hebrew
+        m.recordingLanguage = .swedish
         return m
     }
 
@@ -682,7 +696,7 @@ final class ManagedSettingsMilaConfigPrecedenceTests: XCTestCase {
         XCTAssertEqual(h.remote.apiKey, "org-token")
         XCTAssertNil(KeychainHelper.load(key: h.keychainKey),
                      "The file's token must not reach the Keychain while the key is managed")
-        XCTAssertEqual(h.language.current, .hebrew)
+        XCTAssertEqual(h.language.current, .swedish)
         XCTAssertEqual(h.remote.model, "file-model", "Unmanaged fields still import")
     }
 

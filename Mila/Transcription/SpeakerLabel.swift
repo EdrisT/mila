@@ -2,8 +2,9 @@ import Foundation
 import TranscriptionCore
 
 /// Translation of the diarizer's raw `SPEAKER_00` / `SPEAKER_01` /…
-/// identifiers into a label the user actually wants to see — `Speaker A`
-/// in English, `דובר א׳` in Hebrew.
+/// identifiers into a label the user actually wants to see — `Talare A` in
+/// Swedish, `Speaker A` in English, and `דובר א׳` for the rows an older
+/// build saved with `language == "he"`.
 ///
 /// The raw labels stay in the internal data model (segment metadata)
 /// because they're stable across runs and tooling outside Mila
@@ -17,7 +18,7 @@ import TranscriptionCore
 extension String {
     /// The label to show/export for this raw speaker ID: the
     /// user-assigned name when one exists, otherwise the friendly
-    /// "Speaker A" / "דובר א׳" fallback.
+    /// "Speaker A" / "Talare A" fallback.
     func displaySpeakerName(names: [String: String], language: String) -> String {
         if let name = names[self]?.trimmingCharacters(in: .whitespacesAndNewlines),
            !name.isEmpty {
@@ -31,7 +32,12 @@ extension String {
         let suffix = self.dropFirst("SPEAKER_".count)
         guard let n = Int(suffix), n >= 0 else { return self }
         switch language {
+        case "sv":
+            return "Talare \(latinLetter(n))"
         case "he":
+            // Legacy rows only. Hebrew is no longer a language Mila offers, but
+            // a transcript an older build saved still carries `"he"`, and its
+            // label must not change underneath the user.
             return "דובר \(hebrewOrdinal(n))"
         default:
             return "Speaker \(latinLetter(n))"

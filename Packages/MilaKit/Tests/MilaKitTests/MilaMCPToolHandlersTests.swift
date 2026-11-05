@@ -243,6 +243,29 @@ final class MilaMCPToolHandlersTests: XCTestCase {
         XCTAssertThrowsError(try call("list_recordings", ["after": "not-a-date"]))
     }
 
+    /// A re-transcription keeps the row's old summary and flags it with
+    /// `summary_stale_at`; the app shows a matching notice. A client that pulls
+    /// transcript + summary in one call has no other way to learn the overview
+    /// describes text that is no longer on the row, so it would quote an
+    /// out-of-date summary as if it covered the transcript it just fetched.
+    func test_get_transcript_flags_a_summary_written_from_an_earlier_transcript() throws {
+        var stale = meeting("Re-run", daysAgo: 0, summary: "Overview of the earlier pass")
+        stale.summaryStaleAt = Date(timeIntervalSince1970: 1_700_000_600)
+        let fresh = meeting("Never re-run", daysAgo: 1, summary: "Current overview")
+        try seedStore([fresh, stale])
+
+        let flagged = try call("get_transcript", ["id": stale.id.uuidString])
+        XCTAssertEqual(flagged["summary"] as? String, "Overview of the earlier pass",
+                       "the summary is still returned — flagging it is not the same as hiding it")
+        let stamped = try XCTUnwrap(flagged["summary_stale_at"] as? String)
+        XCTAssertTrue(stamped.hasPrefix("2023-11-14T22:23:20"),
+                       "ISO-8601, like every other timestamp in the payload (got \\(stamped))")
+
+        let current = try call("get_transcript", ["id": fresh.id.uuidString])
+        XCTAssertNil(current["summary_stale_at"],
+                       "a row that was never re-transcribed carries no key at all")
+    }
+
     func test_get_transcript_latest_with_names_and_summary() throws {
         try seedStore([
             meeting("Latest", daysAgo: 0,

@@ -26,10 +26,14 @@ private let obsidianLog = Logger(subsystem: "io.island.whisper.IslandWhisper",
 /// recording ID to its last-written relative path, so a re-transcription (or a
 /// title edit) overwrites/renames the same note instead of leaving duplicates.
 ///
-/// The `pending` set is the sequencing gate: a fresh completion is marked
-/// pending, and the actual write happens from `RecordingSummarizer`'s
-/// completion hook once the summary is final. Backfilled recordings are never
-/// marked pending, so a launch-time summary sweep can't spam the vault.
+/// **When it writes.** From the transcription-completion hook (and from
+/// `QuickActionsController.finalizeTail` on the live-transcript path), straight
+/// from the transcript. It used to wait for the summary: a fresh completion was
+/// marked pending and the note was written from `RecordingSummarizer`'s
+/// completion hook. #3934 removed the automatic summary, so there is no longer a
+/// summary to wait for — and a note written before the user presses Summarize is
+/// re-written by that same hook once a summary exists, so the vault ends up with
+/// the overview rather than the transcript fallback either way.
 @MainActor
 final class ObsidianExporter: ObservableObject {
     static let writtenIndexKey = "obsidian.writtenIndex"
@@ -39,28 +43,22 @@ final class ObsidianExporter: ObservableObject {
     private let defaults: UserDefaults
     private let fileManager: FileManager
 
-    private var pending: Set<UUID> = []
-
-    /// Recordings the user threw away during this session — a tombstone, not a
-    /// cleared flag.
+    /// Recordings the user threw away during this session — a tombstone.
     ///
-    /// `clearPending` on its own loses the race. `cancelAndDiscard` does not
-    /// cancel `QuickActionsController.finalizeTail`, which is still running
-    /// (on the VAD path it awaits the OFFLINE re-diarize, so the window is
-    /// tens of seconds, not milliseconds) and ends by calling `markPending`
-    /// for the same id. Worse, the summary that follows can be *skipped* —
-    /// summaries off, LLM unconfigured, empty transcript — and every skip path
-    /// in `RecordingSummarizer` fires `onSummaryFinished` **synchronously**
-    /// with a fallback snapshot of the recording. That hook only checks
-    /// `isPending`, so the note lands for a recording the user discarded and
-    /// that no longer exists in the store. (The success path is already safe:
-    /// `runSummary` bails on its "is the row still in the store?" lookup.)
+    /// A discard does not cancel `QuickActionsController.finalizeTail`, which is
+    /// still running (on the VAD path it awaits the OFFLINE re-diarize, so the
+    /// window is tens of seconds, not milliseconds) and ends by exporting the
+    /// note for the same id. And a manual Summarize / Regenerate can finish after
+    /// the row is gone, firing `onSummaryFinished` with a snapshot of a
+    /// recording that no longer exists. Either way the note would land in the
+    /// vault for something the user deleted — "I discarded it and it's in my
+    /// vault anyway" reads as the app ignoring the discard.
     ///
-    /// Session-scoped and deliberately not persisted: a discard only has to
-    /// beat work already in flight, and a fresh launch has none. The gate sits
-    /// on `markPending` and `export`, the two entry points a completion hook
-    /// can reach; `exportAll` is the "Sync existing transcripts" backfill over
-    /// `store.recordings`, which cannot contain a permanently-deleted row.
+    /// Session-scoped and deliberately not persisted: a discard only has to beat
+    /// work already in flight, and a fresh launch has none. The gate sits on
+    /// `export`, the one entry point those hooks reach; `exportAll` is the "Sync
+    /// existing transcripts" sweep over `store.recordings`, which cannot contain
+    /// a permanently-deleted row.
     private var discarded: Set<UUID> = []
 
     init(settings: ObsidianVaultSettings,
@@ -72,16 +70,6 @@ final class ObsidianExporter: ObservableObject {
         self.defaults = defaults
         self.fileManager = fileManager
     }
-
-    // MARK: - Pending gate
-
-    /// Ignores an id the user has already thrown away — see `discarded`.
-    func markPending(_ id: UUID) {
-        guard !discarded.contains(id) else { return }
-        pending.insert(id)
-    }
-    func isPending(_ id: UUID) -> Bool { pending.contains(id) }
-    func clearPending(_ id: UUID) { pending.remove(id) }
 
     // MARK: - Export
 
@@ -115,17 +103,15 @@ final class ObsidianExporter: ObservableObject {
     /// written. Returns the removed file, or nil when there was nothing in the
     /// vault for this recording.
     ///
-    /// Called when the user throws a recording away. Export is driven off the
-    /// summarizer's completion hook, which can fire either side of a discard,
-    /// so clearing the gate alone would still leave a note behind whenever the
-    /// summary happened to land first — and "I discarded it and it's in my
-    /// vault anyway" reads as the app ignoring the discard.
+    /// Called when the user throws a recording away. Both export paths can fire
+    /// either side of a discard, so a note may already exist by the time the
+    /// discard arrives — hence delete-if-present, and tombstone so nothing that
+    /// is still in flight re-files it.
     @discardableResult
     func discardNote(for recording: Recording) -> URL? {
         // Tombstone first, before any early return: even with no vault picked
-        // right now, a later `markPending` for this id must not re-arm.
+        // right now, a later `export` for this id must not re-file it.
         discarded.insert(recording.id)
-        clearPending(recording.id)
         guard let vault = settings.vaultURL else { return nil }
         var index = writtenIndex()
         let key = Self.indexKey(vault: vault, id: recording.id)
@@ -192,7 +178,7 @@ final class ObsidianExporter: ObservableObject {
 
         // The index is loaded once and stored once. Per-note persistence would
         // re-serialize the whole dictionary for every recording, which is what
-        // actually makes a large backfill expensive — not the file writes.
+        // actually makes a large `exportAll` sweep expensive — not the file writes.
         var index = writtenIndex()
         var changed: [URL] = []
         // Counted separately from `changed`: a rename contributes *two* paths
@@ -320,7 +306,8 @@ final class ObsidianExporter: ObservableObject {
     /// to delete.
     ///
     /// **Stickiness is the whole point.** A re-export (re-transcription, a
-    /// summary landing, a backfill sweep) must resolve to the file it wrote
+    /// summary landing after the user pressed Summarize / Regenerate, an
+    /// "Export all" sweep) must resolve to the file it wrote
     /// last time, not to a fresh name — otherwise every pass would leave
     /// another copy behind. Two things provide it:
     ///

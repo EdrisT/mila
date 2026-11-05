@@ -167,11 +167,36 @@ private struct RecordingContextMenu: ViewModifier {
                     showingSendSheet = true
                 }
                 .disabled(recording.fullText.isEmpty && recording.segments.isEmpty)
+                // A summary is something the user asks for (#3934), so the list
+                // row gets the same entry point the detail screen has:
+                // "Summarize" when the row has no overview yet, "Regenerate
+                // summary" when it has one — worded as out of date when a
+                // re-transcription replaced the transcript it was written from
+                // (`summaryStaleAt`).
+                if (recording.summary ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Button("Summarize") {
+                        summarizer.summarizeIfNeeded(recording)
+                    }
+                    .disabled(isBusy
+                              || summarizer.isSummarizing(recording.id)
+                              || recording.fullText
+                                .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityIdentifier("context.summarize")
+                } else {
+                    Button(recording.summaryIsStale
+                           ? "Regenerate summary (out of date)"
+                           : "Regenerate summary") {
+                        summarizer.regenerate(recording)
+                    }
+                    .disabled(isBusy || summarizer.isSummarizing(recording.id))
+                    .accessibilityIdentifier("context.regenerateSummary")
+                }
                 // Per-recording summary language. Picking one persists it on
                 // the live row and regenerates right away, so the user sees
-                // the summary + action items come back in that language
-                // instead of waiting for the next automatic pass. Re-picking
-                // the ✓'d entry is a no-op (`RecordingSummarizer.setSummaryLanguage`).
+                // the summary + action items come back in that language.
+                // Re-picking the ✓'d entry is a no-op
+                // (`RecordingSummarizer.setSummaryLanguage`).
                 SummaryLanguageMenu(
                     current: recording.summaryLanguageOverride,
                     global: liveAI.outputLanguage,

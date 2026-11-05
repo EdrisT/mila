@@ -118,6 +118,39 @@ struct Recording: Identifiable, Codable, Hashable {
     /// nil for any recording that ran without Live AI mode active.
     var summary: String?
 
+    /// When the transcript behind an existing summary stopped describing it —
+    /// a completed re-transcription, or a transcript edit — while the summary
+    /// itself was kept. nil means "this summary was generated from the
+    /// transcript on the row" (or there is no summary at all). Set by
+    /// `RecordingStore.markSummaryStale` when a pass replaces a transcript a
+    /// summary had already been written for; cleared by
+    /// `RecordingStore.clearSummaryStaleness` as part of the write that stores
+    /// a freshly generated one.
+    ///
+    /// A stored marker rather than a derived comparison because the transcript
+    /// is not in the row (`fullText` lives in the sidecar `.txt`) and the
+    /// summarizer does not keep the text it summarized: recomputing would mean
+    /// hashing a transcript on every launch, and it would silently "repair" the
+    /// flag for a row whose sidecar was edited by hand. A timestamp also
+    /// survives to the surfaces that show a summary without the app's memory —
+    /// a `.milashare` receiver and the MCP helper.
+    ///
+    /// Omitted from recordings.json when nil, so an unaffected row encodes
+    /// byte-identically to before the field existed. Mirrored in MilaKit's
+    /// `StoredRecording` and carried in `ShareManifest.RecordingPayload`, both
+    /// because a summary that travels should not arrive looking current when
+    /// it does not.
+    var summaryStaleAt: Date?
+
+    /// True when a summary sits on this row that was NOT generated from the
+    /// transcript currently on it. The one question the "out of date" notice
+    /// and the Summarize button's emphasis ask; deliberately a computed
+    /// property so no view re-derives it from a nil-check on its own.
+    var summaryIsStale: Bool {
+        guard summaryStaleAt != nil else { return false }
+        return !(summary ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     /// Action items surfaced by Live AI during the recording. nil when
     /// Live AI wasn't running; an empty array means it ran but produced
     /// nothing (rare — usually means the LLM CLI returned an error).
@@ -150,11 +183,11 @@ struct Recording: Identifiable, Codable, Hashable {
     var speakerNames: [String: String]
 
     /// Per-recording override of the language the AI summary and action
-    /// items are written in — a `RecordingLanguage` raw value (`"he"` /
+    /// items are written in — a `RecordingLanguage` raw value (`"sv"` /
     /// `"en"`). nil means "follow Settings → AI Features → Output language",
     /// which is what every recording has until the user picks a language
     /// for it from the Summary language menu. Independent of `language`
-    /// (the whisper model): a Hebrew meeting can carry an English summary.
+    /// (the whisper model): a Swedish meeting can carry an English summary.
     /// Survives re-transcription on purpose — it records what the user
     /// asked for, not what the transcript happened to be in.
     ///
@@ -164,9 +197,9 @@ struct Recording: Identifiable, Codable, Hashable {
 
     /// `summaryLanguage` as a `RecordingLanguage`, or nil when unset OR
     /// unrecognised. Deliberately `init(rawValue:)` rather than
-    /// `RecordingLanguage.fromCode`: `fromCode` falls back to Hebrew for any
+    /// `RecordingLanguage.fromCode`: `fromCode` falls back to Swedish for any
     /// unknown string, which would turn a hand-edited `"fr"` in
-    /// recordings.json into a silent Hebrew override. Unknown → nil → the
+    /// recordings.json into a silent Swedish override. Unknown → nil → the
     /// global setting applies (`bugbot-rules/untrusted-persisted-data.md`).
     var summaryLanguageOverride: RecordingLanguage? {
         summaryLanguage.flatMap(RecordingLanguage.init(rawValue:))
@@ -203,7 +236,7 @@ struct Recording: Identifiable, Codable, Hashable {
     /// that never finished), and cleared when a pass settles the row.
     ///
     /// Persisted on the row, not held in memory, because the re-run can
-    /// outlive the process: "Re-transcribe in Hebrew" on an English
+    /// outlive the process: "Re-transcribe in Swedish" on an English
     /// recording, quit, relaunch — the recovery sweep hands the `.pending`
     /// row straight back to the worker, nothing calls
     /// `prepareForRetranscription` again — and a Stop after that must still
@@ -325,9 +358,9 @@ struct Recording: Identifiable, Codable, Hashable {
     /// Settle a pass that FAILED (rather than being stopped). A re-run that
     /// left the earlier transcript in place is undone exactly as a stop
     /// undoes it (`restoreRetranscriptionPriorState`), so a failed
-    /// "Re-transcribe in Hebrew" leaves the English transcript English,
-    /// `.completed` and made by the earlier model — not labelled Hebrew,
-    /// rendered right-to-left, reported as Hebrew over MCP, and demoted to
+    /// "Re-transcribe in Swedish" leaves the English transcript English,
+    /// `.completed` and made by the earlier model — not labelled Swedish,
+    /// reported as Swedish over MCP, and demoted to
     /// `.failed`, which would switch off everything keyed on `.completed`
     /// (island-io/mila#330). The failure itself is reported by the caller's
     /// `lastError` alert. Anything else — a first transcription, or a row
@@ -359,7 +392,7 @@ struct Recording: Identifiable, Codable, Hashable {
          source: RecordingSource,
          audioFileName: String,
          status: TranscriptionStatus = .pending,
-         language: String = "he",
+         language: String = "sv",
          modelName: String? = nil,
          segments: [TranscriptSegment] = [],
          fullText: String = "",
@@ -368,6 +401,7 @@ struct Recording: Identifiable, Codable, Hashable {
          appName: String? = nil,
          appBundleID: String? = nil,
          summary: String? = nil,
+         summaryStaleAt: Date? = nil,
          actionItems: [ActionItem]? = nil,
          voiceMemoUniqueID: String? = nil,
          voiceMemoFolderUUID: String? = nil,
@@ -396,6 +430,7 @@ struct Recording: Identifiable, Codable, Hashable {
         self.appName = appName
         self.appBundleID = appBundleID
         self.summary = summary
+        self.summaryStaleAt = summaryStaleAt
         self.actionItems = actionItems
         self.voiceMemoUniqueID = voiceMemoUniqueID
         self.voiceMemoFolderUUID = voiceMemoFolderUUID
@@ -449,7 +484,7 @@ struct Recording: Identifiable, Codable, Hashable {
         case id, title, createdAt, duration, source, audioFileName,
              status, language, modelName, segments, deletedAt, folder, appName,
              appBundleID,
-             summary, actionItems, voiceMemoUniqueID, voiceMemoFolderUUID,
+             summary, summaryStaleAt, actionItems, voiceMemoUniqueID, voiceMemoFolderUUID,
              speakerNames, summaryLanguage, sharedBy, sharedAt, transcriptionDeferredAt,
              retranscriptionPriorState, speakerNameSuggestions,
              untranscribedSpans, calendarLink
@@ -475,6 +510,9 @@ struct Recording: Identifiable, Codable, Hashable {
         self.appName = try c.decodeIfPresent(String.self, forKey: .appName)
         self.appBundleID = try c.decodeIfPresent(String.self, forKey: .appBundleID)
         self.summary = try c.decodeIfPresent(String.self, forKey: .summary)
+        // `try?` for the all-or-nothing reason the other optional fields use:
+        // a marker this build cannot read costs a stale badge, never the library.
+        self.summaryStaleAt = try? c.decodeIfPresent(Date.self, forKey: .summaryStaleAt) ?? nil
         self.actionItems = try c.decodeIfPresent([ActionItem].self, forKey: .actionItems)
         self.voiceMemoUniqueID = try c.decodeIfPresent(String.self, forKey: .voiceMemoUniqueID)
         self.voiceMemoFolderUUID = try c.decodeIfPresent(String.self, forKey: .voiceMemoFolderUUID)
@@ -524,6 +562,9 @@ struct Recording: Identifiable, Codable, Hashable {
         try c.encodeIfPresent(appName, forKey: .appName)
         try c.encodeIfPresent(appBundleID, forKey: .appBundleID)
         try c.encodeIfPresent(summary, forKey: .summary)
+        // Omitted when nil — the common case — so an unaffected row is
+        // byte-identical to what the previous release wrote.
+        try c.encodeIfPresent(summaryStaleAt, forKey: .summaryStaleAt)
         try c.encodeIfPresent(actionItems, forKey: .actionItems)
         try c.encodeIfPresent(voiceMemoUniqueID, forKey: .voiceMemoUniqueID)
         try c.encodeIfPresent(voiceMemoFolderUUID, forKey: .voiceMemoFolderUUID)

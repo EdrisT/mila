@@ -251,9 +251,9 @@ struct HomeView: View {
             Text("·")
                 .foregroundStyle(.tertiary)
             HStack(spacing: 4) {
-                Text("🇮🇱")
+                Text("🇸🇪")
                 Text("dictate")
-                Text(hotkeys.binding(for: .dictateHebrew).displayName)
+                Text(hotkeys.binding(for: .dictateSwedish).displayName)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.primary.opacity(0.7))
             }
