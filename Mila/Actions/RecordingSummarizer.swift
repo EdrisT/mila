@@ -930,10 +930,24 @@ final class RecordingSummarizer: ObservableObject {
     /// invited vs. audible — so a prompt that wants "who was here" needs the
     /// second one, and the two together let the model note who was invited but
     /// never spoke.
+    ///
+    /// `{{DATE}}`/`{{TIME}}` describe when the recording *started*, which is NOT
+    /// `createdAt` — see the `end`/`start` pair below. `{{DATE}}` follows the
+    /// start, so a meeting that ran 23:30–00:10 is filed under the day it began.
     static func promptValues(for recording: Recording,
                              languageName: String,
                              transcript: String) -> [String: String] {
-        let start = recording.createdAt
+        // `createdAt` is when the ROW was created, and every source creates the
+        // row when capture STOPS (`stopRecording` mints it; a recovered row
+        // takes the WAV's mtime, `RecordingStore.recoverOrphanRecordings`). It
+        // is therefore the recording's END, and nothing persisted ever carried
+        // its start — so the start only exists by subtracting the audio length.
+        // Two known imprecisions, both better than sending the end as the start:
+        // `duration` excludes paused time, so a session with pauses really did
+        // begin earlier; and a row whose duration was never filled in (0)
+        // collapses to start == end.
+        let end = recording.createdAt
+        let start = end.addingTimeInterval(-recording.duration)
         let link = recording.calendarLink
         return [
             PromptVariable.language.rawValue: languageName,
@@ -942,8 +956,7 @@ final class RecordingSummarizer: ObservableObject {
             PromptVariable.title.rawValue: recording.title,
             PromptVariable.date.rawValue: Self.format(start, format: "yyyy-MM-dd"),
             PromptVariable.time.rawValue: Self.format(start, format: "HH:mm"),
-            PromptVariable.endTime.rawValue: Self.format(start.addingTimeInterval(recording.duration),
-                                                         format: "HH:mm"),
+            PromptVariable.endTime.rawValue: Self.format(end, format: "HH:mm"),
             PromptVariable.duration.rawValue: Self.durationText(recording.duration),
             PromptVariable.sourceApp.rawValue: recording.appName ?? "",
             PromptVariable.eventTitle.rawValue: link?.eventTitle ?? "",

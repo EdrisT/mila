@@ -1970,6 +1970,11 @@ final class RecordingSummarizerTests: XCTestCase {
     /// Dates are fixed-format in the device's own clock (`en_US_POSIX` shapes,
     /// not locale-following text) because they land in a prompt and in an
     /// Obsidian `[[YYYY-MM-DD]]` link, not on a screen.
+    ///
+    /// `createdAt` is the moment the row was written — i.e. when capture ENDED —
+    /// so `{{TIME}}` is `createdAt - duration` and `{{END_TIME}}` is `createdAt`
+    /// itself. Treating `createdAt` as the start made every summary see a
+    /// meeting that began when it finished and ended twice its length later.
     func test_promptVariables_format_the_recording_itself() throws {
         var rec = Recording(title: "Stämma", source: .microphone, audioFileName: "s.wav",
                             fullText: "vi diskuterade roadmapen")
@@ -1991,11 +1996,55 @@ final class RecordingSummarizerTests: XCTestCase {
         XCTAssertEqual(values["TRANSCRIPT"], "TRANSCRIPT")
         XCTAssertEqual(values["TITLE"], "Stämma")
         XCTAssertEqual(values["DATE"], "2026-03-04")
-        XCTAssertEqual(values["TIME"], "09:15")
-        XCTAssertEqual(values["END_TIME"], "10:17")
+        XCTAssertEqual(values["TIME"], "08:13",
+                       "createdAt is the END, so the start is createdAt - duration")
+        XCTAssertEqual(values["END_TIME"], "09:15",
+                       "the end is createdAt itself, not createdAt + duration")
         XCTAssertEqual(values["DURATION"], "1 h 2 min")
         XCTAssertEqual(values["SOURCE_APP"], "Zoom")
         XCTAssertEqual(values["SPEAKERS"], "Anna, Talare B")
+    }
+
+    /// A recording that ran across midnight is dated by the day it BEGAN — the
+    /// day a user looks for it under, and the day a `[[YYYY-MM-DD]]` heading in
+    /// their own notes would carry.
+    func test_promptVariables_date_follows_the_start_not_the_end() throws {
+        var components = DateComponents()
+        components.year = 2026; components.month = 3; components.day = 5
+        components.hour = 0; components.minute = 10
+        var rec = Recording(title: "Night shift", source: .microphone, audioFileName: "n.wav",
+                            fullText: "handover")
+        rec.createdAt = try XCTUnwrap(Calendar.current.date(from: components))
+        rec.duration = 2_400   // 40 min, so it started 2026-03-04 23:30
+
+        let values = RecordingSummarizer.promptValues(for: rec,
+                                                      languageName: "English",
+                                                      transcript: "TRANSCRIPT")
+        XCTAssertEqual(values["DATE"], "2026-03-04")
+        XCTAssertEqual(values["TIME"], "23:30")
+        XCTAssertEqual(values["END_TIME"], "00:10")
+        XCTAssertEqual(values["DURATION"], "40 min")
+    }
+
+    /// A row whose duration was never filled in (a recovered recording before
+    /// transcription) has nothing to subtract: start and end collapse onto
+    /// `createdAt`, which is the least wrong answer, not a bogus midnight start.
+    func test_promptVariables_zero_duration_collapses_start_onto_createdAt() throws {
+        var components = DateComponents()
+        components.year = 2026; components.month = 3; components.day = 4
+        components.hour = 14; components.minute = 30
+        var rec = Recording(title: "Recovered", source: .microphone, audioFileName: "r.wav",
+                            fullText: "x")
+        rec.createdAt = try XCTUnwrap(Calendar.current.date(from: components))
+        rec.duration = 0
+
+        let values = RecordingSummarizer.promptValues(for: rec,
+                                                      languageName: "English",
+                                                      transcript: "TRANSCRIPT")
+        XCTAssertEqual(values["DATE"], "2026-03-04")
+        XCTAssertEqual(values["TIME"], "14:30")
+        XCTAssertEqual(values["END_TIME"], "14:30")
+        XCTAssertEqual(values["DURATION"], "0 min")
     }
 
     func test_durationText_stays_a_number_the_user_can_wrap_in_their_own_words() {

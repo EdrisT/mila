@@ -70,7 +70,7 @@ enum PromptVariable: String, CaseIterable {
         case .transcript: return "the transcript, with a speaker label on every turn"
         case .speakers: return "every voice that produced audio, in the order they first speak — "
                             + "named if you named it, labelled otherwise (empty if diarization was off)"
-        case .date: return "the recording date as YYYY-MM-DD"
+        case .date: return "the day the recording started, as YYYY-MM-DD"
         case .time: return "when the recording started, HH:MM"
         case .endTime: return "when it ended, HH:MM"
         case .duration: return "how long it ran, e.g. 47 min"
